@@ -3,13 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 
-from agent.openaisdk import OpenAISDKAgent
+from agent import GoogleADKAgent, OpenAISDKAgent
 from src.runtime.config import InferenceConfig
-from src.runtime.openaisdk import run_batch
+from src.runtime.common import run_batch
+
+PROVIDER_REGISTRY = {
+    "googleadk": GoogleADKAgent,
+    "openaisdk": OpenAISDKAgent,
+}
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run OpenAI SDK task inference from a YAML config.")
+    parser = argparse.ArgumentParser(description="Run task inference from YAML config.")
     parser.add_argument("--runtime-config", help="Path to the runtime/model YAML config")
     parser.add_argument("--task-config", help="Path to the task-list YAML config")
     args = parser.parse_args()
@@ -19,7 +24,11 @@ def main() -> None:
     else:
         raise SystemExit("Provide --runtime-config and --task-config, or provide --config for a legacy combined file")
 
-    agent = OpenAISDKAgent(
+    agent_cls = PROVIDER_REGISTRY.get(config.provider)
+    if agent_cls is None:
+        raise SystemExit(f"Unsupported provider '{config.provider}'. Expected one of {sorted(PROVIDER_REGISTRY)}")
+
+    agent = agent_cls(
         model=config.model,
         temperature=config.temperature,
         max_turns=config.max_turns,

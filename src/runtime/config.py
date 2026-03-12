@@ -6,6 +6,16 @@ from typing import Any
 
 from abstention_factory.src.utils.file_io import read_yaml
 
+DEFAULT_PROVIDER = "openaisdk"
+SUPPORTED_PROVIDERS = frozenset({"openaisdk", "googleadk"})
+
+
+def _normalize_provider(provider: Any) -> str:
+    value = DEFAULT_PROVIDER if provider is None else str(provider)
+    if value not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"Unsupported provider: {value}. Expected one of {sorted(SUPPORTED_PROVIDERS)}")
+    return value
+
 
 @dataclass
 class InferenceTaskConfig:
@@ -34,6 +44,7 @@ class InferenceTaskConfig:
 
 @dataclass
 class RuntimeConfig:
+    provider: str
     model: str
     temperature: float
     max_turns: int
@@ -50,6 +61,7 @@ class RuntimeConfig:
             raise ValueError(f"Runtime config missing required keys: {missing}")
 
         return cls(
+            provider=_normalize_provider(payload.get("provider")),
             model=str(payload["model"]),
             temperature=float(payload["temperature"]) if payload["temperature"] is not None else None,
             max_turns=int(payload["max_turns"]),
@@ -58,6 +70,7 @@ class RuntimeConfig:
 
     def to_dict(self) -> dict[str, Any]:
         return {
+            "provider": self.provider,
             "model": self.model,
             "temperature": self.temperature,
             "max_turns": self.max_turns,
@@ -99,6 +112,10 @@ class InferenceConfig:
         return self.runtime.model
 
     @property
+    def provider(self) -> str:
+        return self.runtime.provider
+
+    @property
     def temperature(self) -> float:
         return self.runtime.temperature
 
@@ -130,6 +147,7 @@ class InferenceConfig:
             raise ValueError("Combined inference config must include 'tasks'")
 
         runtime = RuntimeConfig(
+            provider=_normalize_provider(payload.get("provider")),
             model=str(payload["model"]),
             temperature=float(payload["temperature"]),
             max_turns=int(payload["max_turns"]),

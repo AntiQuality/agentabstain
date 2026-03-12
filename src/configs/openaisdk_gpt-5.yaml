@@ -1,3 +1,4 @@
+provider: "openaisdk"
 model: "gpt-5-2025-08-07"
 temperature: Null
 max_turns: 20

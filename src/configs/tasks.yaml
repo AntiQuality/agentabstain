@@ -1,5 +1,11 @@
 tasks:
   - category: "missing_critical_parameter"
+    task_id: "001"
+    task_type: "act"
+  - category: "missing_critical_parameter"
+    task_id: "001"
+    task_type: "abstain"
+  - category: "missing_critical_parameter"
     task_id: "002"
     task_type: "act"
   - category: "missing_critical_parameter"
