@@ -33,33 +33,27 @@ class InferenceTaskConfig:
 
 
 @dataclass
-class InferenceConfig:
+class RuntimeConfig:
     model: str
     temperature: float
     max_turns: int
     results_root: str
-    tasks: list[InferenceTaskConfig]
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "InferenceConfig":
+    def from_yaml(cls, path: str | Path) -> "RuntimeConfig":
         payload = read_yaml(path)
         if not isinstance(payload, dict):
-            raise ValueError(f"Inference config must be a mapping: {path}")
+            raise ValueError(f"Runtime config must be a mapping: {path}")
 
-        missing = [key for key in ("model", "temperature", "max_turns", "results_root", "tasks") if key not in payload]
+        missing = [key for key in ("model", "temperature", "max_turns", "results_root") if key not in payload]
         if missing:
-            raise ValueError(f"Inference config missing required keys: {missing}")
-
-        tasks_payload = payload["tasks"]
-        if not isinstance(tasks_payload, list) or not tasks_payload:
-            raise ValueError("Inference config 'tasks' must be a non-empty list")
+            raise ValueError(f"Runtime config missing required keys: {missing}")
 
         return cls(
             model=str(payload["model"]),
-            temperature=float(payload["temperature"]),
+            temperature=float(payload["temperature"]) if payload["temperature"] is not None else None,
             max_turns=int(payload["max_turns"]),
             results_root=str(payload["results_root"]),
-            tasks=[InferenceTaskConfig.from_dict(item) for item in tasks_payload],
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -68,5 +62,83 @@ class InferenceConfig:
             "temperature": self.temperature,
             "max_turns": self.max_turns,
             "results_root": self.results_root,
+        }
+
+
+@dataclass
+class TaskListConfig:
+    tasks: list[InferenceTaskConfig]
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "TaskListConfig":
+        payload = read_yaml(path)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Task config must be a mapping: {path}")
+        if "tasks" not in payload:
+            raise ValueError(f"Task config missing required key: tasks")
+
+        tasks_payload = payload["tasks"]
+        if not isinstance(tasks_payload, list) or not tasks_payload:
+            raise ValueError("Task config 'tasks' must be a non-empty list")
+
+        return cls(tasks=[InferenceTaskConfig.from_dict(item) for item in tasks_payload])
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
             "tasks": [task.to_dict() for task in self.tasks],
         }
+
+
+@dataclass
+class InferenceConfig:
+    runtime: RuntimeConfig
+    task_list: TaskListConfig
+
+    @property
+    def model(self) -> str:
+        return self.runtime.model
+
+    @property
+    def temperature(self) -> float:
+        return self.runtime.temperature
+
+    @property
+    def max_turns(self) -> int:
+        return self.runtime.max_turns
+
+    @property
+    def results_root(self) -> str:
+        return self.runtime.results_root
+
+    @property
+    def tasks(self) -> list[InferenceTaskConfig]:
+        return self.task_list.tasks
+
+    @classmethod
+    def from_files(cls, runtime_path: str | Path, task_path: str | Path) -> "InferenceConfig":
+        return cls(
+            runtime=RuntimeConfig.from_yaml(runtime_path),
+            task_list=TaskListConfig.from_yaml(task_path),
+        )
+
+    @classmethod
+    def from_yaml(cls, path: str | Path) -> "InferenceConfig":
+        payload = read_yaml(path)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Inference config must be a mapping: {path}")
+        if "tasks" not in payload:
+            raise ValueError("Combined inference config must include 'tasks'")
+
+        runtime = RuntimeConfig(
+            model=str(payload["model"]),
+            temperature=float(payload["temperature"]),
+            max_turns=int(payload["max_turns"]),
+            results_root=str(payload["results_root"]),
+        )
+        task_list = TaskListConfig(tasks=[InferenceTaskConfig.from_dict(item) for item in payload["tasks"]])
+        return cls(runtime=runtime, task_list=task_list)
+
+    def to_dict(self) -> dict[str, Any]:
+        payload = self.runtime.to_dict()
+        payload.update(self.task_list.to_dict())
+        return payload
