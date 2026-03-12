@@ -1,0 +1,11 @@
+model: "gpt-5.1"
+temperature: 0.0
+max_turns: 20
+results_root: "results/openaisdk"
+tasks:
+  - category: "missing_critical_parameter"
+    task_id: "001"
+    task_type: "act"
+  - category: "missing_critical_parameter"
+    task_id: "001"
+    task_type: "abstain"
