@@ -1,0 +1,16 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+
+def discover_run_result_paths(results_root: str | Path, provider: str, model: str) -> list[Path]:
+    model_root = Path(results_root) / provider / model
+    if not model_root.exists():
+        raise FileNotFoundError(f"Results root does not exist: {model_root}")
+
+    run_result_paths = [
+        path
+        for path in model_root.glob("*/*/*/*/run_result.json")
+        if "batch_runs" not in path.parts
+    ]
+    return sorted(run_result_paths)
