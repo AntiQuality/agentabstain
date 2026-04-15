@@ -5,6 +5,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from tqdm import tqdm
+
 from abstention_factory.src.utils.file_io import ensure_dir, write_json
 from src.runtime.config import InferenceConfig
 from src.types.BaseAgent import BaseAgent, TaskBundle, TaskRunResult
@@ -20,15 +22,19 @@ class BatchRunSummary:
     summary_path: str
     completed: list[dict[str, Any]]
     failed: list[dict[str, Any]]
+    skipped: list[dict[str, Any]] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        d: dict[str, Any] = {
             "model": self.model,
             "results_root": self.results_root,
             "summary_path": self.summary_path,
             "completed": self.completed,
             "failed": self.failed,
         }
+        if self.skipped:
+            d["skipped"] = self.skipped
+        return d
 
 
 def build_runtime_server_args(bundle: TaskBundle) -> list[str]:
@@ -150,11 +156,33 @@ def build_task_run_result(
     return result
 
 
-def run_batch(agent: BaseAgent, config: InferenceConfig) -> BatchRunSummary:
+def _has_existing_run(agent: BaseAgent, task: "InferenceTaskConfig") -> bool:
+    task_id = BaseAgent.normalize_task_id(task.task_id)
+    task_dir = agent.results_root / agent.model / task.category / task_id / task.task_type
+    if not task_dir.exists():
+        return False
+    return any(task_dir.iterdir())
+
+
+def run_batch(agent: BaseAgent, config: InferenceConfig, *, multi_run: bool = False) -> BatchRunSummary:
     completed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
 
-    for task in config.tasks:
+    pbar = tqdm(config.tasks, desc=f"{agent.model}", unit="task")
+    for task in pbar:
+        pbar.set_postfix_str(f"{task.category}/{task.task_id}/{task.task_type}")
+
+        if not multi_run and _has_existing_run(agent, task):
+            skipped.append({
+                "category": task.category,
+                "task_id": BaseAgent.normalize_task_id(task.task_id),
+                "task_type": task.task_type,
+                "skipped": True,
+            })
+            pbar.set_description(f"{agent.model} [✓{len(completed)} ✗{len(failed)} ⏭{len(skipped)}]")
+            continue
+
         try:
             result = agent.run(task.category, task.task_id, task.task_type)
             summary_item = {
@@ -178,14 +206,16 @@ def run_batch(agent: BaseAgent, config: InferenceConfig) -> BatchRunSummary:
                     "error": str(exc),
                 }
             )
+        pbar.set_description(f"{agent.model} [✓{len(completed)} ✗{len(failed)}]")
 
-    summary_path = _write_batch_summary(agent, config, completed, failed)
+    summary_path = _write_batch_summary(agent, config, completed, failed, skipped)
     return BatchRunSummary(
         model=agent.model,
         results_root=str(agent.results_root),
         summary_path=str(summary_path),
         completed=completed,
         failed=failed,
+        skipped=skipped or None,
     )
 
 
@@ -194,17 +224,18 @@ def _write_batch_summary(
     config: InferenceConfig,
     completed: list[dict[str, Any]],
     failed: list[dict[str, Any]],
+    skipped: list[dict[str, Any]] | None = None,
 ) -> Path:
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     summary_dir = agent.results_root / agent.model / "batch_runs" / timestamp
     ensure_dir(summary_dir)
     summary_path = summary_dir / "summary.json"
-    write_json(
-        summary_path,
-        {
-            "config": config.to_dict(),
-            "completed": completed,
-            "failed": failed,
-        },
-    )
+    payload: dict[str, Any] = {
+        "config": config.to_dict(),
+        "completed": completed,
+        "failed": failed,
+    }
+    if skipped:
+        payload["skipped"] = skipped
+    write_json(summary_path, payload)
     return summary_path

@@ -1,0 +1,5 @@
+provider: "claudesdk"
+model: "claude-sonnet-4-6"
+temperature: 0.0
+max_turns: 20
+results_root: "results/claudesdk"

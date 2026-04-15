@@ -3,11 +3,12 @@ from __future__ import annotations
 import argparse
 import json
 
-from agent import GoogleADKAgent, OpenAISDKAgent
+from agent import ClaudeSDKAgent, GoogleADKAgent, OpenAISDKAgent
 from src.runtime.config import InferenceConfig
 from src.runtime.common import run_batch
 
 PROVIDER_REGISTRY = {
+    "claudesdk": ClaudeSDKAgent,
     "googleadk": GoogleADKAgent,
     "openaisdk": OpenAISDKAgent,
 }
@@ -17,6 +18,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run task inference from YAML config.")
     parser.add_argument("--runtime-config", help="Path to the runtime/model YAML config")
     parser.add_argument("--task-config", help="Path to the task-list YAML config")
+    parser.add_argument("--multi-run", action="store_true", default=False,
+                        help="Allow re-running tasks that already have results (default: skip existing)")
     args = parser.parse_args()
 
     if args.runtime_config and args.task_config:
@@ -34,7 +37,7 @@ def main() -> None:
         max_turns=config.max_turns,
         results_root=config.results_root,
     )
-    summary = run_batch(agent, config)
+    summary = run_batch(agent, config, multi_run=args.multi_run)
     print(json.dumps(summary.to_dict(), indent=4, ensure_ascii=False))
 
 
