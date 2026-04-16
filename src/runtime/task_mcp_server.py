@@ -30,6 +30,24 @@ async def main() -> None:
     env_cls = get_environment_class(bundle.env_type)
     environment = env_cls(bundle.initial_state)
 
+    # Apply declarative tool overrides (e.g. critical_tool_failure broken tools)
+    for broken in bundle.task_yaml.get("tool_overrides", {}).get("broken_tools", []):
+        await environment.abreak_tool(broken["name"], broken.get("error", "Service unavailable"))
+
+    # Enforce available_tools restriction (e.g. insufficient_tool_capability)
+    # If task.yaml declares available_tools, remove unlisted tools from MCP server
+    available_tools_spec = bundle.task_yaml.get("available_tools")
+    if available_tools_spec is not None:
+        allowed_names = {
+            t["name"] if isinstance(t, dict) else t
+            for t in available_tools_spec
+        }
+        all_tools = await environment.mcp.list_tools()
+        for tool in all_tools:
+            tool_name = tool.name if hasattr(tool, "name") else tool.get("name")
+            if tool_name and tool_name not in allowed_names:
+                environment.hide_tool(tool_name)
+
     @environment.mcp.tool(name=RUNTIME_EXPORT_TOOL_NAME, description="Runtime-only export of state and execution log.")
     def export_snapshot() -> dict[str, Any]:
         return {

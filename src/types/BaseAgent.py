@@ -78,14 +78,26 @@ class BaseAgent(ABC):
     @classmethod
     def normalize_task_id(cls, task_id: str | int) -> str:
         raw = str(task_id).strip()
+
+        # Pure numeric: zero-pad and add default "task_" prefix
+        if raw.isdigit():
+            return f"task_{raw.zfill(3)}"
+
+        # Already has a prefix (e.g. "dev_v1_001", "task_001"): use as-is
+        # but zero-pad trailing numeric part if present
+        if "_" in raw:
+            parts = raw.rsplit("_", 1)
+            if parts[-1].isdigit():
+                return f"{parts[0]}_{parts[-1].zfill(3)}"
+            return raw
+
+        # Legacy: "task_NNN" pattern
         if raw.startswith("task_"):
             suffix = raw[5:]
-        else:
-            suffix = raw
+            if suffix.isdigit():
+                return f"task_{suffix.zfill(3)}"
 
-        if not suffix.isdigit():
-            raise ValueError(f"task_id must be numeric or task_NNN, got: {task_id}")
-        return f"task_{suffix.zfill(3)}"
+        return raw
 
     @classmethod
     def resolve_task_dir(cls, category: str, task_id: str | int, task_type: str) -> Path:
