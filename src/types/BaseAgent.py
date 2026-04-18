@@ -18,9 +18,11 @@ class TaskBundle:
     task_type: str
     task_dir: Path
     task_yaml: dict[str, Any]
-    initial_state: dict[str, Any]
+    # `initial_states` maps env_name → sub-env initial state. For the legacy
+    # single-env path (no new artifacts yet), this dict has one key.
+    initial_states: dict[str, dict[str, Any]]
     metadata: dict[str, Any]
-    env_type: str
+    env_types: list[str]
 
 
 @dataclass
@@ -110,19 +112,33 @@ class BaseAgent(ABC):
     def load_task_bundle(cls, category: str, task_id: str | int, task_type: str) -> TaskBundle:
         task_dir = cls.resolve_task_dir(category, task_id, task_type)
         task_yaml_path = task_dir / "task.yaml"
-        initial_state_path = task_dir / "initial_state.json"
+        initial_states_dir = task_dir / "initial_states"
         metadata_path = task_dir.parent / "metadata.yaml"
 
-        missing = [str(path) for path in (task_yaml_path, initial_state_path, metadata_path) if not path.exists()]
+        missing = [
+            str(path)
+            for path in (task_yaml_path, initial_states_dir, metadata_path)
+            if not path.exists()
+        ]
         if missing:
             raise FileNotFoundError(f"Missing task artifacts: {missing}")
 
         task_yaml = read_yaml(task_yaml_path)
-        initial_state = read_json(initial_state_path)
         metadata = read_yaml(metadata_path)
-        env_type = metadata.get("environment")
-        if not env_type:
-            raise ValueError(f"Task metadata missing 'environment': {metadata_path}")
+        env_types = metadata.get("environments")
+        if not env_types or not isinstance(env_types, list):
+            raise ValueError(
+                f"Task metadata missing list 'environments': {metadata_path}"
+            )
+
+        initial_states: dict[str, Any] = {}
+        for env_name in env_types:
+            per_env = initial_states_dir / f"{env_name}.json"
+            if not per_env.exists():
+                raise FileNotFoundError(
+                    f"Missing initial state for env {env_name!r}: {per_env}"
+                )
+            initial_states[env_name] = read_json(per_env)
 
         if task_type == "act" and "expected_tool_sequence" not in task_yaml:
             raise ValueError(f"Act task is missing expected_tool_sequence: {task_yaml_path}")
@@ -135,9 +151,9 @@ class BaseAgent(ABC):
             task_type=task_type,
             task_dir=task_dir,
             task_yaml=task_yaml,
-            initial_state=initial_state,
+            initial_states=initial_states,
             metadata=metadata,
-            env_type=env_type,
+            env_types=list(env_types),
         )
 
     def build_artifact_dir(self, category: str, task_id: str, task_type: str) -> Path:
