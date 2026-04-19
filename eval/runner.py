@@ -18,6 +18,102 @@ from tqdm import tqdm
 
 DEFAULT_JUDGE_CONFIG_PATH = Path("eval/configs/default.yaml")
 
+# Canonical vocabulary for the `task_type` field. Every task pair emits
+# one act and one abstain task (see WriteTaskPairNode in
+# abstention_factory/src/nodes/write_task_pair.py). Analysis code
+# (eval/statistics/analysis.py) pivots specifically on these two values.
+# Extending this set requires updating:
+#   - this runner's load-error fallback
+#   - eval/statistics/analysis.py pivot + summary code
+#   - any downstream notebooks that compare act-vs-abstain behavior
+# Unknown task_types surfaced at load time are flagged via a
+# `task_type_unknown` metric rather than silently dropped, so schema
+# drift is visible in the aggregate.
+KNOWN_TASK_TYPES = frozenset({"act", "abstain"})
+
+
+def _canonicalize_task_type(value):
+    """Normalize common task_type drift (casing, whitespace) and match
+    against KNOWN_TASK_TYPES. Returns the canonical form or None."""
+    if not isinstance(value, str):
+        return None
+    normalized = value.strip().lower()
+    if normalized in KNOWN_TASK_TYPES:
+        return normalized
+    return None
+
+
+def _resolve_eval_identity(run_result_path, run_result_partial):
+    """Derive the (category, task_id, task_type) identity tuple that
+    will key this eval row in `select_latest_runs()`.
+
+    `is_canonical_slot = True` means: this artifact can be treated as
+    part of a real task bucket and standard-metric failure rows are
+    safe to emit under the resolved identity. It is only returned True
+    when THREE sources agree that this is a real task slot:
+
+      1. The PATH directory structure is canonical (task_type slot is
+         "act"/"abstain" after strip+lower normalization).
+      2. Either run_result.json has no `task_dir`, or its `task_dir`'s
+         last three components (<category>/<task_id>/<task_type>) agree
+         with the path's canonical identity. A misplaced
+         run_result.json (copied from task A into task B's canonical
+         results slot) would have task_dir pointing at task A while the
+         path points at task B -- we refuse to emit standard failure
+         rows in that case because they'd poison task B's bucket with
+         metrics computed from task A's bundle.
+
+    When either check fails, is_canonical_slot is False and the caller
+    should emit only a diagnostic metric (no standard-metric failure
+    rows) so the artifact stays visible without corrupting headline
+    denominators.
+
+    The canonical-path-only rule matches the write_task_pair convention
+    (abstention_factory/src/nodes/write_task_pair.py): tasks live under
+    tasks/<category>/<pair_id>/{act,abstain}/task.yaml so task_dir's
+    parts[-3:] are (category, pair_id, task_type).
+
+    Returns (category, task_id, task_type, is_canonical_slot).
+    """
+    path_parts = Path(run_result_path).parts
+    path_category = path_parts[-5] if len(path_parts) >= 5 else None
+    path_task_id = path_parts[-4] if len(path_parts) >= 4 else None
+    path_task_type_raw = path_parts[-3] if len(path_parts) >= 3 else None
+    path_task_type = _canonicalize_task_type(path_task_type_raw)
+
+    if path_task_type is None:
+        # Non-canonical path slot. Never promote to a canonical bucket
+        # based on JSON alone -- a stray artifact that happens to have
+        # task_type: "act" in its JSON must not manufacture failure
+        # rows for a task that doesn't exist.
+        json_category = run_result_partial.get("category") or path_category
+        json_task_id = run_result_partial.get("task_id") or path_task_id
+        raw_task_type = run_result_partial.get("task_type") or path_task_type_raw
+        return (json_category, json_task_id, raw_task_type, False)
+
+    # Path slot is canonical. Cross-check task_dir against path to
+    # detect misplacement (run_result.json from task A copied into task
+    # B's results slot).
+    task_dir = run_result_partial.get("task_dir")
+    if isinstance(task_dir, str) and task_dir:
+        td_parts = Path(task_dir).parts
+        td_category = td_parts[-3] if len(td_parts) >= 3 else None
+        td_task_id = td_parts[-2] if len(td_parts) >= 2 else None
+        td_task_type_raw = td_parts[-1] if len(td_parts) >= 1 else None
+        td_task_type = _canonicalize_task_type(td_task_type_raw)
+        path_identity = (path_category, path_task_id, path_task_type)
+        td_identity = (td_category, td_task_id, td_task_type)
+        if td_identity != path_identity:
+            # task_dir says this is a different task than the path
+            # slot claims. Cross-task contamination: emit diagnostic
+            # only, don't write failure rows into the path bucket.
+            return (path_category, path_task_id, path_task_type, False)
+
+    # Path slot canonical AND task_dir consistent (or absent). Safe to
+    # trust the path identity: any producer drift on JSON identity
+    # fields is contained to the path-derived bucket.
+    return (path_category, path_task_id, path_task_type, True)
+
 
 def build_evaluators(config: EvaluationConfig):
     return [
@@ -47,11 +143,227 @@ def evaluate_provider_model(
     )
 
     for run_result_path in progress:
-        bundle = load_evaluation_bundle(run_result_path, provider=provider, model=model)
+        try:
+            bundle = load_evaluation_bundle(run_result_path, provider=provider, model=model)
+        except Exception as exc:
+            # A single malformed bundle (missing paired-act task.yaml,
+            # broken node ref in critical_actions, corrupt YAML, etc.)
+            # should not abort the entire provider/model sweep. Emit a
+            # run-scoped error payload next to the run_result.json so
+            # downstream analysis can see exactly which runs failed to
+            # load, and keep going.
+            #
+            # Critical: we emit failing rows for EVERY standard evaluator
+            # (not just a synthetic `bundle_load` metric). Without this,
+            # select_latest_runs would replace an older successful eval
+            # with this load-error row, dropping the task from the
+            # strict/loose/response_llm_judge denominators entirely --
+            # shrinking the reported sample and inflating pass rates.
+            # With pass=False rows for each standard metric, the task
+            # stays in every denominator as a failure.
+            output_path = Path(run_result_path).parent / "eval.json"
+            path = Path(run_result_path)
+            run_result_partial: dict = {}
+            try:
+                run_result_partial = json.loads(path.read_text())
+            except Exception:
+                pass
+            # Resolve the eval identity tuple. When the results-tree
+            # path slot is canonical (after normalization), trust the
+            # path for category/task_id/task_type so latest-run dedupe
+            # supersedes any stale passing row in that slot even under
+            # simultaneous producer drift on multiple identity fields.
+            # See _resolve_eval_identity for the full rationale.
+            category, task_id, task_type, is_canonical_slot = (
+                _resolve_eval_identity(run_result_path, run_result_partial)
+            )
+            # Check path slot canonicity independently: controls
+            # whether we can emit standard-metric failure rows safely.
+            # task_dir disagreement (which flips is_canonical_slot=False)
+            # shouldn't suppress standard rows -- the rows are
+            # synthetic `pass=False` markers, not computed metrics, so
+            # emitting them under path-derived identity correctly says
+            # "this canonical slot has a broken artifact" and keeps
+            # the task in the denominator.
+            path_task_type_raw = (
+                Path(run_result_path).parts[-3]
+                if len(Path(run_result_path).parts) >= 3
+                else None
+            )
+            path_slot_canonical = _canonicalize_task_type(path_task_type_raw) is not None
+            error_str = f"{type(exc).__name__}: {exc}"
+            failure_row = {"pass": False, "error": error_str}
+            # Only suppress standard-metric rows when the PATH slot
+            # itself is non-canonical (operator-dropped auxiliary
+            # artifact, non-task directory). For canonical slots we
+            # always emit failure rows to preserve denominators.
+            if path_slot_canonical:
+                load_error_metrics: dict[str, dict] = {
+                    evaluator.name: dict(failure_row) for evaluator in evaluators
+                }
+            else:
+                # Don't create act/abstain-shaped rows for unknown
+                # task_types, but DO emit a dedicated `task_type_unknown`
+                # metric so schema drift surfaces loudly in aggregate
+                # reporting (analysis.py will show these as a distinct
+                # metric_name with pass=False). Silent dropping would
+                # look like a clean sweep.
+                load_error_metrics = {
+                    "task_type_unknown": {
+                        "pass": False,
+                        "error": (
+                            f"task_type={task_type!r} is not in canonical "
+                            f"vocabulary {sorted(KNOWN_TASK_TYPES)!r}. Either "
+                            f"the results tree has a non-standard artifact "
+                            f"at this path or the task_type vocabulary "
+                            f"needs extending (see eval/runner.py:"
+                            f"KNOWN_TASK_TYPES)."
+                        ),
+                    },
+                }
+            # Diagnostic metric always present so operators can spot-check
+            # which runs failed to load without scanning load_error strings.
+            load_error_metrics["bundle_load"] = dict(failure_row)
+            write_json(
+                output_path,
+                {
+                    "provider": provider,
+                    "model": model,
+                    "category": category,
+                    "task_id": task_id,
+                    "task_type": task_type,
+                    "expected_behavior": task_type,
+                    "run_id": path.parent.name,
+                    "artifact_dir": str(path.parent),
+                    "task_dir": run_result_partial.get("task_dir"),
+                    "run_result_path": str(run_result_path),
+                    "generated_at": utc_now_iso(),
+                    "run_error": run_result_partial.get("error"),
+                    "load_error": error_str,
+                    "metrics": load_error_metrics,
+                },
+            )
+            written_paths.append(output_path)
+            continue
         progress.set_postfix_str(
             f"{bundle.category}/{bundle.task_id}/{bundle.task_type}/{bundle.run_id}",
             refresh=False,
         )
+        # Successful-load identity handling:
+        #   (1) Happy path -- path canonical AND task_dir agrees:
+        #       bundle came from the task the slot claims. Run
+        #       evaluators normally. If bundle.task_type/category/
+        #       task_id have benign casing drift, the written eval.json
+        #       still keys on the canonicalized (resolved) identity so
+        #       dedupe is stable.
+        #   (2) Path canonical BUT task_dir disagrees -- bundle came
+        #       from a DIFFERENT task than the slot claims. Running
+        #       evaluators here would compute wrong-task metrics under
+        #       the slot's identity. Emit synthetic pass=False rows
+        #       instead, so the slot stays in denominators as a
+        #       failure without contaminating numerators.
+        #   (3) Path non-canonical: no task slot to key rows under.
+        #       Emit diagnostic only.
+        canonical_bundle_task_type = _canonicalize_task_type(bundle.task_type)
+        bundle_identity = _resolve_eval_identity(
+            run_result_path,
+            {
+                "category": bundle.category,
+                "task_id": bundle.task_id,
+                "task_type": bundle.task_type,
+                "task_dir": str(bundle.task_dir),
+            },
+        )
+        bundle_category, bundle_task_id, resolved_task_type, is_canonical_slot = bundle_identity
+        path_task_type_raw = (
+            Path(run_result_path).parts[-3]
+            if len(Path(run_result_path).parts) >= 3
+            else None
+        )
+        path_slot_canonical = _canonicalize_task_type(path_task_type_raw) is not None
+        # Drift branch fires on: (a) misplacement (path canonical +
+        # task_dir disagrees), (b) non-canonical path slot, OR (c)
+        # bundle.task_type that can't be canonicalized at all. Case (c)
+        # matters because load_evaluation_bundle only normalizes
+        # strip+lower hits against the canonical set; a wholly unknown
+        # value like "ACTION" or "validation" slips through with
+        # bundle.task_type preserved as the raw string. Evaluators key
+        # on `task_type == "act"` exactly and would fall back to
+        # abstain semantics, flipping pass/fail outcomes on an
+        # otherwise-loadable bundle. Route these through drift so
+        # synthetic failure rows preserve denominator visibility.
+        misplaced_in_canonical = path_slot_canonical and not is_canonical_slot
+        non_canonical_slot = not path_slot_canonical
+        bundle_task_type_unknown = canonical_bundle_task_type is None
+        if misplaced_in_canonical or non_canonical_slot or bundle_task_type_unknown:
+            output_path = bundle.artifact_dir / "eval.json"
+            # Read RAW task_type from run_result for diagnostic clarity.
+            # bundle.task_type is canonicalized at load time so
+            # evaluators see a known value; the raw form is only
+            # needed here to help operators track down producer drift.
+            raw_bundle_task_type = bundle.run_result.get("task_type")
+            task_type_unknown_row = {
+                "pass": False,
+                "error": (
+                    f"Identity drift detected: run_result reports "
+                    f"category={bundle.category!r}, task_id={bundle.task_id!r}, "
+                    f"task_type={raw_bundle_task_type!r} (canonicalized to "
+                    f"{bundle.task_type!r}), but resolved identity is "
+                    f"({bundle_category!r}, {bundle_task_id!r}, "
+                    f"{resolved_task_type!r}). Producer drift (casing, "
+                    f"whitespace, renamed fields) or schema extension. "
+                    f"See eval/runner.py:KNOWN_TASK_TYPES."
+                ),
+            }
+            # Gate standard-metric failure rows on PATH canonicity
+            # only. task_dir misplacement (which flips
+            # is_canonical_slot=False) should still emit pass=False
+            # rows under the path-derived identity: the rows are
+            # synthetic markers saying "this slot has a broken
+            # artifact", not metrics computed from the (wrong) bundle.
+            # Dropping them for misplacement would shrink the
+            # strict/loose/judge denominators and inflate headline
+            # pass rates, defeating the R8-F2 denominator-preservation
+            # goal. Diagnostic-only is reserved for the case where
+            # there is no canonical task slot to key rows under.
+            if path_slot_canonical:
+                failure_row = {
+                    "pass": False,
+                    "error": (
+                        f"bundle identity drift ({bundle.category!r}, "
+                        f"{bundle.task_id!r}, {bundle.task_type!r}) -> "
+                        f"canonical ({bundle_category!r}, "
+                        f"{bundle_task_id!r}, {resolved_task_type!r}); "
+                        f"is_canonical_slot={is_canonical_slot} "
+                        f"(task_dir={'agrees' if is_canonical_slot else 'disagrees'} with path)"
+                    ),
+                }
+                metrics = {
+                    evaluator.name: dict(failure_row) for evaluator in evaluators
+                }
+                metrics["task_type_unknown"] = task_type_unknown_row
+            else:
+                metrics = {"task_type_unknown": task_type_unknown_row}
+            write_json(
+                output_path,
+                {
+                    "provider": provider,
+                    "model": model,
+                    "category": bundle_category,
+                    "task_id": bundle_task_id,
+                    "task_type": resolved_task_type,
+                    "expected_behavior": resolved_task_type,
+                    "run_id": bundle.run_id,
+                    "artifact_dir": str(bundle.artifact_dir),
+                    "task_dir": str(bundle.task_dir),
+                    "run_result_path": str(run_result_path),
+                    "generated_at": utc_now_iso(),
+                    "run_error": bundle.run_result.get("error"),
+                    "metrics": metrics,
+                },
+            )
+            written_paths.append(output_path)
+            continue
         output_path = bundle.artifact_dir / "eval.json"
         existing_payload = None
         if output_path.exists():
@@ -75,13 +387,21 @@ def evaluate_provider_model(
                     "error": str(exc),
                 }
 
+        # Write eval.json with canonicalized identity so benign
+        # metadata drift (e.g. bundle.task_type="Act", path="/act/")
+        # still dedupes into the canonical slot under select_latest_runs.
+        # bundle_category/bundle_task_id/resolved_task_type come from
+        # _resolve_eval_identity -- path-derived when the slot is
+        # canonical (which is the case here: we only reach this
+        # happy-path write when misplaced_in_canonical was False and
+        # non_canonical_slot was False).
         eval_payload = {
             "provider": provider,
             "model": model,
-            "category": bundle.category,
-            "task_id": bundle.task_id,
-            "task_type": bundle.task_type,
-            "expected_behavior": bundle.task_type,
+            "category": bundle_category,
+            "task_id": bundle_task_id,
+            "task_type": resolved_task_type,
+            "expected_behavior": resolved_task_type,
             "run_id": bundle.run_id,
             "artifact_dir": str(bundle.artifact_dir),
             "task_dir": str(bundle.task_dir),
