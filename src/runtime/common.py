@@ -157,22 +157,64 @@ def build_task_run_result(
 
 
 def _has_existing_run(agent: BaseAgent, task: "InferenceTaskConfig") -> bool:
+    """Return True iff at least one timestamped run under this task slot
+    has a `run_result.json` whose `error` field is null — i.e. a real
+    successful completion worth skipping on a re-run.
+
+    Prior behavior was to skip on *any* file in the directory, which also
+    skipped failed runs (the runtime writes `run_result.json` with an
+    `error` field when a task errors out), making re-runs silently retain
+    transient infra failures. Now failed runs force a retry.
+    """
+    import json
+
     task_id = BaseAgent.normalize_task_id(task.task_id)
     task_dir = agent.results_root / agent.model / task.category / task_id / task.task_type
     if not task_dir.exists():
         return False
-    return any(task_dir.iterdir())
+    for ts_dir in task_dir.iterdir():
+        if not ts_dir.is_dir():
+            continue
+        rr = ts_dir / "run_result.json"
+        if not rr.exists():
+            continue
+        try:
+            data = json.loads(rr.read_text())
+        except Exception:
+            continue
+        if data.get("error") is None:
+            return True
+    return False
 
 
-def run_batch(agent: BaseAgent, config: InferenceConfig, *, multi_run: bool = False) -> BatchRunSummary:
+def run_batch(
+    agent: BaseAgent,
+    config: InferenceConfig,
+    *,
+    multi_run: bool = False,
+    workers: int = 1,
+) -> BatchRunSummary:
+    """Run the task list.
+
+    `workers=1` keeps the original sequential semantics. `workers>1` runs
+    up to N tasks concurrently using an asyncio semaphore; each task gets
+    its own MCP server subprocess (see build_runtime_server_args) so
+    concurrency is safe across tasks. Skip-existing is evaluated once
+    per task before it's scheduled, so two workers never start the same
+    task slot. Result-file writes are per-(task_dir, timestamp) so
+    there's no filesystem race.
+    """
+    import asyncio
+
     completed: list[dict[str, Any]] = []
     failed: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
 
-    pbar = tqdm(config.tasks, desc=f"{agent.model}", unit="task")
-    for task in pbar:
-        pbar.set_postfix_str(f"{task.category}/{task.task_id}/{task.task_type}")
-
+    # Pre-filter skips synchronously so the progress bar total reflects only
+    # the work actually being done — mixing skip-counting with async run
+    # bookkeeping would make the bar jump around confusingly.
+    tasks_to_run: list = []
+    for task in config.tasks:
         if not multi_run and _has_existing_run(agent, task):
             skipped.append({
                 "category": task.category,
@@ -180,12 +222,30 @@ def run_batch(agent: BaseAgent, config: InferenceConfig, *, multi_run: bool = Fa
                 "task_type": task.task_type,
                 "skipped": True,
             })
-            pbar.set_description(f"{agent.model} [✓{len(completed)} ✗{len(failed)} ⏭{len(skipped)}]")
             continue
+        tasks_to_run.append(task)
 
+    if not tasks_to_run:
+        summary_path = _write_batch_summary(agent, config, completed, failed, skipped)
+        return BatchRunSummary(
+            model=agent.model,
+            results_root=str(agent.results_root),
+            summary_path=str(summary_path),
+            completed=completed,
+            failed=failed,
+            skipped=skipped or None,
+        )
+
+    pbar = tqdm(
+        total=len(tasks_to_run),
+        desc=f"{agent.model} [⏭{len(skipped)}]",
+        unit="task",
+    )
+
+    async def _run_one(task) -> dict[str, Any]:
         try:
-            result = agent.run(task.category, task.task_id, task.task_type)
-            summary_item = {
+            result = await agent.arun(task.category, task.task_id, task.task_type)
+            item = {
                 "category": task.category,
                 "task_id": result.task_id,
                 "task_type": task.task_type,
@@ -193,20 +253,43 @@ def run_batch(agent: BaseAgent, config: InferenceConfig, *, multi_run: bool = Fa
                 "final_output": result.final_output,
                 "error": result.error,
             }
-            if result.error is None:
-                completed.append(summary_item)
-            else:
-                failed.append(summary_item)
+            return {"ok": result.error is None, "item": item, "label": f"{task.category}/{task.task_id}/{task.task_type}"}
         except Exception as exc:
-            failed.append(
-                {
+            return {
+                "ok": False,
+                "item": {
                     "category": task.category,
                     "task_id": task.task_id,
                     "task_type": task.task_type,
                     "error": str(exc),
-                }
+                },
+                "label": f"{task.category}/{task.task_id}/{task.task_type}",
+            }
+
+    async def _main() -> None:
+        sem = asyncio.Semaphore(max(1, workers))
+
+        async def _gated(task):
+            async with sem:
+                pbar.set_postfix_str(f"{task.category}/{task.task_id}/{task.task_type}")
+                return await _run_one(task)
+
+        coros = [_gated(t) for t in tasks_to_run]
+        # Use as_completed so the pbar advances as results arrive rather
+        # than waiting on gather's all-or-nothing completion.
+        for fut in asyncio.as_completed(coros):
+            res = await fut
+            if res["ok"]:
+                completed.append(res["item"])
+            else:
+                failed.append(res["item"])
+            pbar.update(1)
+            pbar.set_description(
+                f"{agent.model} [✓{len(completed)} ✗{len(failed)} ⏭{len(skipped)}]"
             )
-        pbar.set_description(f"{agent.model} [✓{len(completed)} ✗{len(failed)}]")
+
+    asyncio.run(_main())
+    pbar.close()
 
     summary_path = _write_batch_summary(agent, config, completed, failed, skipped)
     return BatchRunSummary(

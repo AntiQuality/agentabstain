@@ -30,7 +30,13 @@ async def run_claudesdk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
     final_output: str | None = None
     export_payload: dict[str, Any] | None = None
     run_error: str | None = None
-    app_name = f"{bundle.env_type}_runtime"
+    # Keep app_name short — Claude Code SDK prefixes tool names as
+    # `mcp__{app_name}__{mcp_tool_name}` before sending to Anthropic, whose
+    # 128-char tool-name limit is easy to bust when multiple env names
+    # concatenate into `app_name`. MCP tool names can already approach 100
+    # chars post-`.`→`_` munging; keeping app_name short preserves
+    # headroom.
+    app_name = "task_env"
 
     bridge = RuntimeMcpBridge(
         connection_params=StdioServerParameters(

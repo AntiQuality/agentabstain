@@ -28,7 +28,8 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
     final_output: str | None = None
     export_payload: dict[str, Any] | None = None
     run_error: str | None = None
-    app_name = f"{bundle.env_type}_runtime"
+    # See claudesdk.py: keep app_name short to preserve tool-name headroom.
+    app_name = "task_env"
 
     toolset = RuntimeMcpToolset(
         connection_params=StdioServerParameters(
@@ -42,7 +43,7 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
     artifact_service = InMemoryArtifactService()
     runtime_agent = LlmAgent(
         model=agent.model,
-        name=f"{bundle.env_type}_{bundle.task_type}_agent",
+        name=f"{'_'.join(bundle.env_types)}_{bundle.task_type}_agent",
         instruction=bundle.task_yaml["system_prompt"],
         tools=[toolset],
         generate_content_config=types.GenerateContentConfig(temperature=agent.temperature),

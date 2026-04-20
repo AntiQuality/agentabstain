@@ -20,6 +20,10 @@ def main() -> None:
     parser.add_argument("--task-config", help="Path to the task-list YAML config")
     parser.add_argument("--multi-run", action="store_true", default=False,
                         help="Allow re-running tasks that already have results (default: skip existing)")
+    parser.add_argument("--workers", type=int, default=1,
+                        help="Number of tasks to run concurrently (default: 1 sequential). "
+                             "Each concurrent task spawns its own MCP server subprocess; "
+                             "tune based on provider rate limits and local RAM.")
     args = parser.parse_args()
 
     if args.runtime_config and args.task_config:
@@ -37,7 +41,7 @@ def main() -> None:
         max_turns=config.max_turns,
         results_root=config.results_root,
     )
-    summary = run_batch(agent, config, multi_run=args.multi_run)
+    summary = run_batch(agent, config, multi_run=args.multi_run, workers=args.workers)
     print(json.dumps(summary.to_dict(), indent=4, ensure_ascii=False))
 
 

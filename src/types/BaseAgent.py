@@ -140,8 +140,16 @@ class BaseAgent(ABC):
                 )
             initial_states[env_name] = read_json(per_env)
 
-        if task_type == "act" and "expected_tool_sequence" not in task_yaml:
-            raise ValueError(f"Act task is missing expected_tool_sequence: {task_yaml_path}")
+        # Act tasks emit `execution_dag` in the current schema; the old
+        # `expected_tool_sequence` field was retired in the eval-infra
+        # redesign (commit e768ea7) but accept either for back-compat
+        # with archived tasks.
+        if task_type == "act" and not (
+            "execution_dag" in task_yaml or "expected_tool_sequence" in task_yaml
+        ):
+            raise ValueError(
+                f"Act task is missing execution_dag (or legacy expected_tool_sequence): {task_yaml_path}"
+            )
         if task_type == "abstain" and "abstention_trigger" not in task_yaml:
             raise ValueError(f"Abstain task is missing abstention_trigger: {task_yaml_path}")
 

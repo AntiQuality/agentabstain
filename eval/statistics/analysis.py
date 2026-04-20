@@ -112,6 +112,52 @@ def build_metric_run_frame(eval_df: pd.DataFrame) -> pd.DataFrame:
                     "eval_path": row.get("eval_path"),
                 }
             )
+
+        # Synthetic `combined` metric — benchmark-semantic pass:
+        #   informational: response_llm_judge only (commit_check is
+        #     trivially true when critical_actions is empty)
+        #   operational:   commit_check AND response_llm_judge
+        # Any missing/non-bool dependency -> NA so compute_summary_metrics
+        # skips this row instead of counting it as a failure.
+        action_type = row.get("action_type") or ""
+        commit_pass = (
+            metrics.get("commit_check", {}).get("pass")
+            if isinstance(metrics.get("commit_check"), dict)
+            else None
+        )
+        judge_pass = (
+            metrics.get("response_llm_judge", {}).get("pass")
+            if isinstance(metrics.get("response_llm_judge"), dict)
+            else None
+        )
+        if action_type == "informational":
+            combined_pass = judge_pass if isinstance(judge_pass, bool) else pd.NA
+        else:
+            if isinstance(commit_pass, bool) and isinstance(judge_pass, bool):
+                combined_pass = commit_pass and judge_pass
+            else:
+                combined_pass = pd.NA
+        records.append(
+            {
+                "provider": row.get("provider"),
+                "model": row.get("model"),
+                "category": row.get("category"),
+                "task_id": row.get("task_id"),
+                "task_type": row.get("task_type"),
+                "expected_behavior": row.get("expected_behavior"),
+                "action_type": action_type,
+                "run_id": row.get("run_id"),
+                "generated_at": row.get("generated_at"),
+                "metric_name": "combined",
+                "pass": combined_pass,
+                "metric_payload": {
+                    "commit_check_pass": commit_pass,
+                    "response_llm_judge_pass": judge_pass,
+                    "action_type": action_type,
+                },
+                "eval_path": row.get("eval_path"),
+            }
+        )
     metric_df = pd.DataFrame(records)
     if not metric_df.empty:
         metric_df["model_label"] = metric_df["provider"] + "/" + metric_df["model"]
@@ -155,6 +201,20 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
         complete_pairs = group.dropna(subset=["act", "abstain"]) if {"act", "abstain"}.issubset(group.columns) else group.iloc[0:0]
         conditioned = complete_pairs[complete_pairs["act"]]
 
+        # CAR semantics: P(abstain correct | act correct on the paired task).
+        # If complete_pairs is empty -> NA (no data at all to condition on).
+        # If complete_pairs is non-empty but conditioned is empty (should-act
+        # accuracy is 0 on this slice) -> 0.0, so plots/aggregations stay
+        # dense. A model that can't act correctly on any pair has nothing
+        # to be conditionally abstaining about -> CAR=0 is the defensible
+        # readout, not a hole.
+        if complete_pairs.empty:
+            car_value: Any = pd.NA
+        elif conditioned.empty:
+            car_value = 0.0
+        else:
+            car_value = conditioned["abstain"].mean()
+
         summary_records.append(
             {
                 "provider": provider,
@@ -167,7 +227,7 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
                 "paired_accuracy": (
                     (complete_pairs["act"] & complete_pairs["abstain"]).mean() if not complete_pairs.empty else pd.NA
                 ),
-                "car": conditioned["abstain"].mean() if not conditioned.empty else pd.NA,
+                "car": car_value,
                 "num_act": int(len(act_non_null)),
                 "num_abstain": int(len(abstain_non_null)),
                 "num_pairs": int(len(complete_pairs)),

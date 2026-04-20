@@ -25,7 +25,7 @@ async def run_openai_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path)
     run_error: str | None = None
 
     server = MCPServerStdio(
-        name=f"{bundle.env_type}_runtime",
+        name="task_env",  # see claudesdk.py for rationale
         params={
             "command": sys.executable,
             "args": build_runtime_server_args(bundle),
@@ -37,7 +37,7 @@ async def run_openai_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path)
     try:
         await server.connect()
         sdk_agent = Agent(
-            name=f"{bundle.env_type}_{bundle.task_type}_agent",
+            name=f"{'_'.join(bundle.env_types)}_{bundle.task_type}_agent",
             instructions=bundle.task_yaml["system_prompt"],
             model=agent.model,
             model_settings=ModelSettings(temperature=agent.temperature),
