@@ -11,6 +11,7 @@ SUMMARY_COLUMNS = [
     "provider",
     "model",
     "category",
+    "action_type",
     "metric_name",
     "should_act_accuracy",
     "should_abstain_accuracy",
@@ -39,6 +40,7 @@ def load_eval_frame(results_root: str | Path = "results") -> pd.DataFrame:
                 "task_id": payload.get("task_id"),
                 "task_type": payload.get("task_type"),
                 "expected_behavior": payload.get("expected_behavior"),
+                "action_type": payload.get("action_type"),
                 "run_id": payload.get("run_id"),
                 "artifact_dir": payload.get("artifact_dir"),
                 "task_dir": payload.get("task_dir"),
@@ -78,6 +80,7 @@ def build_metric_run_frame(eval_df: pd.DataFrame) -> pd.DataFrame:
                 "task_id",
                 "task_type",
                 "expected_behavior",
+                "action_type",
                 "run_id",
                 "generated_at",
                 "metric_name",
@@ -100,6 +103,7 @@ def build_metric_run_frame(eval_df: pd.DataFrame) -> pd.DataFrame:
                     "task_id": row.get("task_id"),
                     "task_type": row.get("task_type"),
                     "expected_behavior": row.get("expected_behavior"),
+                    "action_type": row.get("action_type"),
                     "run_id": row.get("run_id"),
                     "generated_at": row.get("generated_at"),
                     "metric_name": metric_name,
@@ -123,16 +127,24 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=SUMMARY_COLUMNS)
 
     usable["pass"] = usable["pass"].astype(bool)
+    # Pivot includes action_type so the headline summary table splits
+    # informational vs operational tasks. commit_check on informational
+    # tasks is trivially true (empty critical set), so the split is
+    # essential for honest reporting — without it, informational rows
+    # inflate commit_check pass rates.
+    if "action_type" not in usable.columns:
+        usable["action_type"] = ""
+    usable["action_type"] = usable["action_type"].fillna("")
     pair_df = usable.pivot_table(
-        index=["provider", "model", "category", "metric_name", "task_id"],
+        index=["provider", "model", "category", "action_type", "metric_name", "task_id"],
         columns="task_type",
         values="pass",
         aggfunc="last",
     ).reset_index()
 
     summary_records: list[dict[str, Any]] = []
-    for (provider, model, category, metric_name), group in pair_df.groupby(
-        ["provider", "model", "category", "metric_name"],
+    for (provider, model, category, action_type, metric_name), group in pair_df.groupby(
+        ["provider", "model", "category", "action_type", "metric_name"],
         dropna=False,
     ):
         act_series = group["act"] if "act" in group else pd.Series(dtype="boolean")
@@ -148,6 +160,7 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
                 "provider": provider,
                 "model": model,
                 "category": category,
+                "action_type": action_type,
                 "metric_name": metric_name,
                 "should_act_accuracy": act_non_null.mean() if not act_non_null.empty else pd.NA,
                 "should_abstain_accuracy": abstain_non_null.mean() if not abstain_non_null.empty else pd.NA,
@@ -166,6 +179,6 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
     if not summary_df.empty:
         summary_df["model_label"] = summary_df["provider"] + "/" + summary_df["model"]
     return summary_df.sort_values(
-        by=["category", "provider", "model", "metric_name"],
+        by=["category", "action_type", "provider", "model", "metric_name"],
         kind="stable",
     ).reset_index(drop=True)

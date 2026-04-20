@@ -1,10 +1,22 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from abstention_factory.src.utils.file_io import read_json, read_yaml
+
+# Current schema: `critical_actions` is a `list[str]` of namespaced tool
+# names. Older corpora on disk use `[{node, must_yield}]`. The loader
+# runs strict by default so regenerated tasks fail-loudly on accidental
+# drift; setting `ALLOW_LEGACY_TASK_YAML=1` enables a transitional shim
+# that accepts dict-shaped entries and resolves them to an empty
+# critical_actions set — which makes commit_check on those tasks
+# degenerate (always pass) but keeps the rest of the eval pipeline
+# (response_llm_judge, identity drift handling) functional while a
+# full re-generation of the task corpus is in progress.
+_LEGACY_TASK_YAML_OK = os.environ.get("ALLOW_LEGACY_TASK_YAML") == "1"
 
 
 @dataclass(frozen=True)
@@ -21,6 +33,12 @@ class EvaluationBundle:
     run_result: dict[str, Any]
     task_yaml: dict[str, Any]
     metadata: dict[str, Any]
+    # Read directly from the on-disk persisted list. Empty set for
+    # informational tasks (no commit in the act DAG).
+    critical_actions: set[str] = field(default_factory=set)
+    # action_type from metadata.yaml drives per-action_type analysis
+    # in the statistics/reporting layer.
+    action_type: str = ""
 
 
 def load_evaluation_bundle(run_result_path: str | Path, provider: str, model: str) -> EvaluationBundle:
@@ -29,14 +47,6 @@ def load_evaluation_bundle(run_result_path: str | Path, provider: str, model: st
 
     category = str(run_result["category"])
     task_id = str(run_result["task_id"])
-    # Canonicalize task_type at load time so downstream evaluators
-    # (which key on `task_type == "act"` vs `"abstain"` exactly) don't
-    # flip semantics under benign metadata drift like "Act" / "act ".
-    # Evaluators read bundle.task_type; by normalizing here we keep
-    # the fix in one place rather than scattering strip().lower()
-    # calls across every evaluator. When the raw value cannot be
-    # canonicalized, the runner's drift/diagnostic branch handles
-    # emission before evaluators run.
     raw_task_type = str(run_result["task_type"])
     normalized = raw_task_type.strip().lower()
     task_type = normalized if normalized in {"act", "abstain"} else raw_task_type
@@ -53,17 +63,37 @@ def load_evaluation_bundle(run_result_path: str | Path, provider: str, model: st
         raise FileNotFoundError(f"Missing task artifacts for evaluation: {[str(path) for path in missing]}")
 
     task_yaml = read_yaml(task_yaml_path)
-    # On-disk critical_actions shape is [{node, must_yield}]. The
-    # evaluators match on `tool` + `params`, which live in the
-    # execution_dag node — not on the critical_actions entry itself.
-    # Expand node refs in-memory so matchers see {tool, params,
-    # must_yield}. For abstain tasks (which carry no execution_dag by
-    # design) we look up the paired act task's DAG.
-    task_yaml["critical_actions"] = _expand_critical_actions(
-        task_yaml=task_yaml,
-        task_dir=task_dir,
-        task_type=task_type,
-    )
+    metadata = read_yaml(metadata_path)
+
+    # Trust the persisted list. `WriteTaskPairNode` derives it from the
+    # act DAG + composed env tool_kinds at write time, and the disk-vs-
+    # derived CI test guards against drift.
+    raw_critical = task_yaml.get("critical_actions") or []
+    if not isinstance(raw_critical, list):
+        raise ValueError(
+            f"task.yaml at {task_yaml_path} has critical_actions of type "
+            f"{type(raw_critical).__name__}; expected list[str]."
+        )
+    legacy_dict_entries = [e for e in raw_critical if isinstance(e, dict)]
+    if legacy_dict_entries and _LEGACY_TASK_YAML_OK:
+        # Legacy corpus fallback. We cannot faithfully convert old dict
+        # entries (which key on DAG node ids, not tool kinds) into a
+        # commit-tool set without the env's tool_kinds map — for tasks
+        # whose env doesn't carry kinds, the map is empty. Degenerate
+        # to an empty critical_actions set so commit_check trivially
+        # passes; response_llm_judge still runs.
+        critical_actions: set[str] = set()
+    else:
+        for entry in raw_critical:
+            if not isinstance(entry, str):
+                raise ValueError(
+                    f"task.yaml at {task_yaml_path} has critical_actions "
+                    f"entry {entry!r} of type {type(entry).__name__}; entries "
+                    "must be namespaced tool name strings. Set "
+                    "ALLOW_LEGACY_TASK_YAML=1 to evaluate older dict-shape "
+                    "tasks with a degenerate commit_check."
+                )
+        critical_actions = set(raw_critical)
 
     return EvaluationBundle(
         provider=provider,
@@ -77,118 +107,7 @@ def load_evaluation_bundle(run_result_path: str | Path, provider: str, model: st
         run_result_path=result_path,
         run_result=run_result,
         task_yaml=task_yaml,
-        metadata=read_yaml(metadata_path),
+        metadata=metadata,
+        critical_actions=critical_actions,
+        action_type=str(metadata.get("action_type") or ""),
     )
-
-
-def _expand_critical_actions(
-    task_yaml: dict[str, Any],
-    task_dir: Path,
-    task_type: str,
-) -> list[dict[str, Any]]:
-    """Resolve `critical_actions[i].node` against the execution_dag so
-    matchers see `{tool, params, must_yield}` entries, then append any
-    `additional_critical_actions` the abstain variant declared.
-
-    Act tasks carry their own execution_dag. Abstain tasks do not --
-    they inherit the paired act's DAG, loaded from the sibling
-    ``<pair_id>/act/task.yaml`` written by WriteTaskPairNode.
-
-    Missing DAG / missing node ids raise: silent-drop would recreate
-    the silent matcher-never-matches pathology that prompted this fix.
-    """
-    critical_actions = list(task_yaml.get("critical_actions") or [])
-    additional = list(task_yaml.get("additional_critical_actions") or [])
-
-    # No node refs -> nothing to expand. Still honor additional.
-    if not critical_actions and not additional:
-        return []
-
-    # Lazy DAG resolution: only reach for the paired-act DAG when at least
-    # one critical_actions entry actually references a node. A future
-    # abstain task whose proceed-path coverage lives entirely in
-    # additional_critical_actions (e.g. empty critical_actions list) would
-    # otherwise pay the cross-file lookup cost + its failure modes for
-    # nothing.
-    needs_dag = any(a.get("node") is not None for a in critical_actions)
-
-    dag = task_yaml.get("execution_dag")
-    if dag is None and needs_dag:
-        # Canonicalize task_type before branching. Producer drift on
-        # casing/whitespace (e.g. "Abstain", "abstain ") must not
-        # break paired-act lookup when the bundle is otherwise
-        # evaluable -- that would let metadata-only drift wipe out
-        # abstain results.
-        normalized_task_type = (task_type or "").strip().lower()
-        if normalized_task_type == "abstain":
-            # Abstain inherits act's DAG. Convention: sibling ../act/task.yaml.
-            # Consistent with WriteTaskPairNode (abstention_factory/src/
-            # nodes/write_task_pair.py:63-64, :86-87).
-            act_task_yaml_path = task_dir.parent / "act" / "task.yaml"
-            if not act_task_yaml_path.exists():
-                raise FileNotFoundError(
-                    f"Abstain task at {task_dir} references critical_actions by "
-                    f"node but the paired act task.yaml was not found at "
-                    f"{act_task_yaml_path}"
-                )
-            dag = read_yaml(act_task_yaml_path).get("execution_dag")
-        if dag is None:
-            raise ValueError(
-                f"Cannot expand critical_actions for {task_dir}: no "
-                f"execution_dag available (looked in task.yaml and, for "
-                f"abstain, the paired act task.yaml)"
-            )
-
-    nodes_by_id = {n["id"]: n for n in ((dag or {}).get("nodes") or [])}
-    expanded: list[dict[str, Any]] = []
-    for action in critical_actions:
-        node_id = action.get("node")
-        if node_id is None:
-            raise ValueError(
-                f"critical_actions entry in {task_dir} is missing `node` "
-                f"id: {action!r}"
-            )
-        node = nodes_by_id.get(node_id)
-        if node is None:
-            raise ValueError(
-                f"critical_actions entry in {task_dir} references node "
-                f"{node_id!r} which is not in execution_dag "
-                f"(known: {sorted(nodes_by_id)})"
-            )
-        expanded.append(
-            {
-                "node": node_id,
-                "tool": node.get("tool"),
-                "params": node.get("params") or {},
-                "must_yield": action.get("must_yield"),
-            }
-        )
-
-    for entry in additional:
-        if not isinstance(entry, dict):
-            raise ValueError(
-                f"additional_critical_actions entry in {task_dir} must be a "
-                f"dict, got {type(entry).__name__}: {entry!r}"
-            )
-        tool = entry.get("tool")
-        if not isinstance(tool, str) or not tool:
-            raise ValueError(
-                f"additional_critical_actions entry in {task_dir} must have "
-                f"non-empty `tool` string: {entry!r}"
-            )
-        resolved: dict[str, Any] = {"tool": tool, "must_yield": None}
-        # `params` deliberately preserved as missing-vs-present rather than
-        # coerced to {}. Matchers interpret presence/absence:
-        # absent -> tool-only match; {} -> require empty params.
-        # See critical_action_strict.py for the matching rule.
-        if "params" in entry:
-            params = entry["params"]
-            if not isinstance(params, dict):
-                raise ValueError(
-                    f"additional_critical_actions entry in {task_dir} has "
-                    f"non-dict `params`: {entry!r}"
-                )
-            resolved["params"] = params
-        expanded.append(resolved)
-
-    return expanded

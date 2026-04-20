@@ -4,12 +4,11 @@ import argparse
 import json
 from pathlib import Path
 
-from abstention_factory.src.utils.file_io import utc_now_iso, write_json
+from abstention_factory.src.utils.file_io import read_yaml, utc_now_iso, write_json
 from eval.config import EvaluationConfig
 from eval.discovery import discover_run_result_paths
 from eval.evaluators import (
-    CriticalActionLooseEvaluator,
-    CriticalActionStrictEvaluator,
+    CommitCheckEvaluator,
     ResponseLLMJudgeEvaluator,
 )
 from eval.loader import load_evaluation_bundle
@@ -30,6 +29,26 @@ DEFAULT_JUDGE_CONFIG_PATH = Path("eval/configs/default.yaml")
 # `task_type_unknown` metric rather than silently dropped, so schema
 # drift is visible in the aggregate.
 KNOWN_TASK_TYPES = frozenset({"act", "abstain"})
+
+
+def _peek_action_type(run_result_partial: dict) -> str:
+    """Best-effort read of `action_type` from metadata.yaml when the
+    bundle couldn't load or drifts. Preserves per-action-type denominator
+    visibility on synthetic failure rows so the headline analysis splits
+    don't silently drop the broken runs. Returns "" when unavailable.
+    """
+    task_dir = run_result_partial.get("task_dir")
+    if not isinstance(task_dir, str) or not task_dir:
+        return ""
+    metadata_path = Path(task_dir).parent / "metadata.yaml"
+    if not metadata_path.exists():
+        return ""
+    try:
+        metadata = read_yaml(metadata_path)
+    except Exception:
+        return ""
+    value = metadata.get("action_type") if isinstance(metadata, dict) else None
+    return str(value) if isinstance(value, str) else ""
 
 
 def _canonicalize_task_type(value):
@@ -117,8 +136,7 @@ def _resolve_eval_identity(run_result_path, run_result_partial):
 
 def build_evaluators(config: EvaluationConfig):
     return [
-        CriticalActionStrictEvaluator(),
-        CriticalActionLooseEvaluator(),
+        CommitCheckEvaluator(),
         ResponseLLMJudgeEvaluator(config.judge_models),
     ]
 
@@ -233,6 +251,7 @@ def evaluate_provider_model(
                     "task_id": task_id,
                     "task_type": task_type,
                     "expected_behavior": task_type,
+                    "action_type": _peek_action_type(run_result_partial),
                     "run_id": path.parent.name,
                     "artifact_dir": str(path.parent),
                     "task_dir": run_result_partial.get("task_dir"),
@@ -353,6 +372,7 @@ def evaluate_provider_model(
                     "task_id": bundle_task_id,
                     "task_type": resolved_task_type,
                     "expected_behavior": resolved_task_type,
+                    "action_type": bundle.action_type,
                     "run_id": bundle.run_id,
                     "artifact_dir": str(bundle.artifact_dir),
                     "task_dir": str(bundle.task_dir),
@@ -402,6 +422,7 @@ def evaluate_provider_model(
             "task_id": bundle_task_id,
             "task_type": resolved_task_type,
             "expected_behavior": resolved_task_type,
+            "action_type": bundle.action_type,
             "run_id": bundle.run_id,
             "artifact_dir": str(bundle.artifact_dir),
             "task_dir": str(bundle.task_dir),
