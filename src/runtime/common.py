@@ -125,6 +125,7 @@ def build_task_run_result(
     final_output: str | None,
     export_payload: dict[str, Any] | None,
     run_error: str | None,
+    provider_metadata: dict[str, Any] | None = None,
 ) -> TaskRunResult:
     resolved_payload = export_payload or default_runtime_export_payload()
     trajectory = build_trajectory(
@@ -151,6 +152,7 @@ def build_task_run_result(
         task_metadata=bundle.metadata,
         artifact_dir=str(artifact_dir),
         error=run_error,
+        provider_metadata=provider_metadata,
     )
     agent.persist_run_artifacts(result)
     return result

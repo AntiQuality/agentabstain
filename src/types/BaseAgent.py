@@ -41,6 +41,10 @@ class TaskRunResult:
     task_metadata: dict[str, Any]
     artifact_dir: str
     error: str | None = None
+    # Provider-specific runtime info needed to re-attach to the same model
+    # session after rollout (e.g. claudesdk session_id + cwd for --resume).
+    # None for runtimes that don't expose a resumable session.
+    provider_metadata: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -58,6 +62,7 @@ class TaskRunResult:
             "task_metadata": self.task_metadata,
             "artifact_dir": self.artifact_dir,
             "error": self.error,
+            "provider_metadata": self.provider_metadata,
         }
 
 
