@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 import sys
 from pathlib import Path
 from typing import Any
@@ -28,14 +29,23 @@ from src.types.BaseAgent import BaseAgent, TaskBundle, TaskRunResult
 
 async def run_claudesdk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path) -> TaskRunResult:
     artifact_dir = agent.build_artifact_dir(bundle.category, bundle.task_id, bundle.task_type)
-    # Sandbox cwd: an empty per-rollout directory under the artifact
-    # dir. Claude Code auto-loads CLAUDE.md / .claude/settings.json /
-    # AGENTS.md and walks up the cwd tree picking up parent CLAUDE.mds;
-    # pointing it at an empty sibling directory cuts that channel
-    # entirely while keeping the path stable so resume_session can
-    # locate the session post-rollout. The MCP bridge subprocess keeps
-    # its own cwd=repo_root for tool imports (independent process).
-    sandbox_dir = artifact_dir / "claudesdk_sandbox"
+    # Sandbox cwd lives under /tmp with a neutral, randomized name. The
+    # Claude Code CLI auto-injects a "Working directory: <cwd>" line
+    # into the model's context (CLI-level, not controllable via
+    # ClaudeCodeOptions.system_prompt), so any PII or project
+    # identifiers in the cwd path leak into the model's prompt. A path
+    # under <artifact_dir> contained the host username and repo name
+    # (e.g. /data1/common/xun/Paper/Paper26Abstention/...) which biased
+    # filesystem-themed tasks: the model would call list_files with the
+    # real host path, miss the mocked workspace state, and spiral into
+    # path-guessing loops. Using /tmp/workspace_<rand> strips both PII
+    # and project hints. Per-rollout uniqueness keeps Claude Code's
+    # session storage (~/.claude/projects/<cwd-encoded>/) isolated
+    # under concurrent rollouts. The cwd path is persisted in
+    # provider_metadata so resume_session can re-attach. The MCP
+    # bridge subprocess keeps its own cwd=repo_root for tool imports
+    # (independent process).
+    sandbox_dir = Path("/tmp") / f"workspace_{secrets.token_hex(6)}"
     sandbox_dir.mkdir(parents=True, exist_ok=True)
 
     final_output: str | None = None

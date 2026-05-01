@@ -44,6 +44,12 @@ async def _resume_and_query(
     permission_mode: str = "bypassPermissions",
     max_turns: int | None = None,
 ) -> dict[str, Any]:
+    # Sandbox cwds live under /tmp and may be reaped between rollout
+    # and resume. The SDK validates cwd existence on connect, so
+    # recreate the empty directory if it's gone — Claude Code's
+    # session state is keyed by the *path string*, not the inode, so
+    # a fresh empty dir at the same path resumes correctly.
+    Path(cwd).mkdir(parents=True, exist_ok=True)
     options = ClaudeCodeOptions(
         resume=session_id,
         cwd=cwd,
