@@ -3,6 +3,18 @@ from __future__ import annotations
 import argparse
 import json
 
+from dotenv import load_dotenv
+
+# Load .env BEFORE importing any agent so provider-routing flags
+# (CLAUDE_CODE_USE_BEDROCK=1, AWS_BEARER_TOKEN_BEDROCK, AWS_REGION,
+# OPENAI_API_KEY) reach the Claude Code SDK / OpenAI SDK at import
+# time. Without this, the SDK subprocess inherits only the shell env
+# and falls back to native Anthropic, which rejects Bedrock model
+# IDs like `us.anthropic.claude-opus-4-7` with a generic "model may
+# not exist" error. `override=True` lets .env values shadow shell
+# defaults so the env block in .env is the source of truth.
+load_dotenv(override=True)
+
 from agent import ClaudeSDKAgent, GoogleADKAgent, OpenAISDKAgent
 from src.runtime.config import InferenceConfig
 from src.runtime.common import run_batch

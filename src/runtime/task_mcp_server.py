@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from typing import Any
 
-from abstention_factory.environments_v0430.multi import build_multi_environment
+from abstention_factory.environments.multi import build_multi_environment
 from src.runtime.common import RUNTIME_EXPORT_TOOL_NAME
 from src.types.BaseAgent import BaseAgent
 
