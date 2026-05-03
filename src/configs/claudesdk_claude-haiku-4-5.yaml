@@ -1,5 +1,5 @@
 provider: "claudesdk"
-model: "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+model: "claude-haiku-4-5"
 temperature: 0.0
 max_turns: 30
 results_root: "results/claudesdk"

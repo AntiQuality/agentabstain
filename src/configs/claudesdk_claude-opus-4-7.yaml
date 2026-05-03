@@ -1,5 +1,5 @@
 provider: "claudesdk"
-model: "us.anthropic.claude-opus-4-7"
+model: "claude-opus-4-7"
 temperature: 0.0
 max_turns: 30
 results_root: "results/claudesdk"
