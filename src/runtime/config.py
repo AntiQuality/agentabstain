@@ -7,7 +7,7 @@ from typing import Any
 from abstention_factory.src.utils.file_io import read_yaml
 
 DEFAULT_PROVIDER = "openaisdk"
-SUPPORTED_PROVIDERS = frozenset({"openaisdk", "googleadk", "claudesdk"})
+SUPPORTED_PROVIDERS = frozenset({"openaisdk", "googleadk", "claudesdk", "openclaw"})
 
 
 def _normalize_provider(provider: Any) -> str:

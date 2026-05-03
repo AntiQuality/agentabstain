@@ -2,11 +2,21 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 from abstention_factory.environments.multi import build_multi_environment
 from src.runtime.common import RUNTIME_EXPORT_TOOL_NAME
 from src.types.BaseAgent import BaseAgent
+
+# Optional state-dump hook for runtimes that don't keep an in-process MCP
+# client (e.g. OpenClaw, which spawns the MCP server itself and gives us no
+# way to call the hidden export tool). When RUNTIME_STATE_DUMP_PATH is set,
+# every tool call writes the current state + execution_log to that file so
+# the runtime can read it after the agent finishes.
+RUNTIME_STATE_DUMP_PATH_ENV = "RUNTIME_STATE_DUMP_PATH"
 
 
 def _serialize(value: Any) -> Any:
@@ -51,6 +61,42 @@ async def main() -> None:
             "state": _serialize(menv.state),
             "execution_log": _serialize(menv.get_execution_log()),
         }
+
+    dump_path_str = os.environ.get(RUNTIME_STATE_DUMP_PATH_ENV)
+    if dump_path_str:
+        dump_path = Path(dump_path_str)
+        dump_path.parent.mkdir(parents=True, exist_ok=True)
+
+        def _write_dump() -> None:
+            payload = {
+                "state": _serialize(menv.state),
+                "execution_log": _serialize(menv.get_execution_log()),
+            }
+            tmp = dump_path.with_suffix(dump_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=False))
+            tmp.replace(dump_path)
+
+        # Hook every successful tool call. menv.mcp is a FastMCP-style server
+        # that records calls via its execution log; we want the snapshot
+        # written after each tool call so the latest state is always on
+        # disk by the time the agent exits.
+        original_call = menv.mcp.call_tool
+
+        async def _call_with_dump(*args: Any, **kwargs: Any):
+            try:
+                return await original_call(*args, **kwargs)
+            finally:
+                try:
+                    _write_dump()
+                except Exception:
+                    # Never let the dump break the rollout; the runtime can
+                    # still call the export tool directly as a fallback.
+                    pass
+
+        menv.mcp.call_tool = _call_with_dump  # type: ignore[assignment]
+        # Also write an initial snapshot so the runtime has something to
+        # read even if the agent calls zero tools.
+        _write_dump()
 
     await menv.mcp.run_stdio_async(show_banner=False, log_level="ERROR")
 

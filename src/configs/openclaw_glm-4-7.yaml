@@ -1,0 +1,5 @@
+provider: "openclaw"
+model: "amazon-bedrock/zai.glm-4.7"
+temperature: 0.0
+max_turns: 30
+results_root: "results/openclaw"

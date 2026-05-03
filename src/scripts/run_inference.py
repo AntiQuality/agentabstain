@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 # defaults so the env block in .env is the source of truth.
 load_dotenv(override=True)
 
-from agent import ClaudeSDKAgent, GoogleADKAgent, OpenAISDKAgent
+from agent import ClaudeSDKAgent, GoogleADKAgent, OpenAISDKAgent, OpenClawAgent
 from src.runtime.config import InferenceConfig
 from src.runtime.common import run_batch
 
@@ -23,6 +23,7 @@ PROVIDER_REGISTRY = {
     "claudesdk": ClaudeSDKAgent,
     "googleadk": GoogleADKAgent,
     "openaisdk": OpenAISDKAgent,
+    "openclaw": OpenClawAgent,
 }
 
 
