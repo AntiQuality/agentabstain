@@ -31,6 +31,92 @@ DEFAULT_JUDGE_CONFIG_PATH = Path("eval/configs/default.yaml")
 KNOWN_TASK_TYPES = frozenset({"act", "abstain"})
 
 
+# Classification of provider-/runtime-level run errors. These are runs
+# where the agent never produced a usable final answer (provider gate
+# refused, transport failed, max turns hit, etc.). Such runs are NOT
+# sent to the LLM judge and are NOT counted in the strict/loose/judge
+# denominators -- they're surfaced as a separate `run_error_kind` so
+# `eval/statistics/visualize_metrics.ipynb` can break them down by
+# kind and the operator can decide which to re-run.
+#
+# Distinguishing kinds matters: `policy_refusal` is the Anthropic SDK
+# usage-policy gate (Claude Code refused before the model saw the
+# task), while `api_error` is transient transport that should re-run
+# cleanly. `max_turns_exceeded` is the agent loop hitting its budget
+# (model did try but couldn't finish in time) -- arguably a model
+# failure but excluding it keeps the metrics about decisions the model
+# actually made on its terms.
+RUN_ERROR_KINDS = frozenset(
+    {"policy_refusal", "api_error", "max_turns_exceeded", "runtime_error", "empty_output"}
+)
+
+
+def _classify_run_error(run_result):
+    """Classify a run_result.json into a (kind, message) pair, or
+    (None, None) if the run looks usable. See RUN_ERROR_KINDS for the
+    vocabulary. Reads only top-level fields and provider_metadata so
+    it works on both the full bundle and load-error partial dicts.
+    """
+    if not isinstance(run_result, dict):
+        return (None, None)
+
+    final_output = (run_result.get("final_output") or "").strip()
+    pm = run_result.get("provider_metadata") or {}
+    rm = pm.get("result_message") if isinstance(pm, dict) else None
+    is_error_flag = rm.get("is_error") if isinstance(rm, dict) else None
+
+    # claudesdk surfaces both gate refusals and transport failures via
+    # is_error=True. Disambiguate by message: the gate response is a
+    # known fixed string ("violate our Usage Policy"); everything else
+    # under is_error is treated as transient API error.
+    if is_error_flag is True:
+        if "Usage Policy" in final_output or "violate our Usage Policy" in final_output:
+            return ("policy_refusal", final_output[:200])
+        return ("api_error", final_output[:200] or "is_error=True with empty message")
+
+    top_error = run_result.get("error")
+    if top_error:
+        msg = str(top_error)
+        low = msg.lower()
+        if "max turn" in low or "max_turns" in low:
+            return ("max_turns_exceeded", msg[:200])
+        if (
+            "rate limit" in low
+            or "overloaded" in low
+            or "timeout" in low
+            or "timed out" in low
+            or "connection" in low
+            or "api error" in low
+        ):
+            return ("api_error", msg[:200])
+        return ("runtime_error", msg[:200])
+
+    # No flagged error but no final answer either -- the judge has
+    # nothing to score, so treat as a run error rather than feeding
+    # it through and getting a vacuous "missing final response" fail.
+    if not final_output:
+        return ("empty_output", "")
+
+    return (None, None)
+
+
+def _build_skipped_metrics(evaluators, kind: str) -> dict:
+    """Build a metrics dict where every evaluator is marked as
+    skipped due to a run-level error. `pass=None` so analysis layer
+    drops it from denominators (NA path), and `skipped=<kind>` plus
+    `run_error_kind=<kind>` are mirrored on each row so downstream
+    code can attribute the skip without joining back to the top-level
+    field."""
+    return {
+        evaluator.name: {
+            "pass": None,
+            "skipped": kind,
+            "run_error_kind": kind,
+        }
+        for evaluator in evaluators
+    }
+
+
 def _peek_action_type(run_result_partial: dict) -> str:
     """Best-effort read of `action_type` from metadata.yaml when the
     bundle couldn't load or drifts. Preserves per-action-type denominator
@@ -388,6 +474,37 @@ def evaluate_provider_model(
         existing_payload = None
         if output_path.exists():
             existing_payload = json.loads(output_path.read_text())
+
+        # Provider-/runtime-level run errors: the agent never produced
+        # a scorable answer (gate refusal, transport, max-turns, etc.).
+        # Skip the LLM judge entirely -- there's nothing to judge --
+        # and emit pass=None metrics so the analysis layer drops them
+        # from denominators rather than counting them as failures.
+        # Top-level run_error_kind/run_error_message are surfaced for
+        # the notebook's error-breakdown grid.
+        run_error_kind, run_error_message = _classify_run_error(bundle.run_result)
+        if run_error_kind is not None:
+            eval_payload = {
+                "provider": provider,
+                "model": model,
+                "category": bundle_category,
+                "task_id": bundle_task_id,
+                "task_type": resolved_task_type,
+                "expected_behavior": resolved_task_type,
+                "action_type": bundle.action_type,
+                "run_id": bundle.run_id,
+                "artifact_dir": str(bundle.artifact_dir),
+                "task_dir": str(bundle.task_dir),
+                "generated_at": utc_now_iso(),
+                "run_error": bundle.run_result.get("error"),
+                "run_error_kind": run_error_kind,
+                "run_error_message": run_error_message,
+                "metrics": _build_skipped_metrics(evaluators, run_error_kind),
+            }
+            write_json(output_path, eval_payload)
+            written_paths.append(output_path)
+            continue
+
         metrics: dict[str, dict] = {}
         for evaluator in evaluators:
             if (
@@ -428,6 +545,8 @@ def evaluate_provider_model(
             "task_dir": str(bundle.task_dir),
             "generated_at": utc_now_iso(),
             "run_error": bundle.run_result.get("error"),
+            "run_error_kind": None,
+            "run_error_message": None,
             "metrics": metrics,
         }
         write_json(output_path, eval_payload)

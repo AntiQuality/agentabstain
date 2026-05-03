@@ -46,6 +46,16 @@ def load_eval_frame(results_root: str | Path = "results") -> pd.DataFrame:
                 "task_dir": payload.get("task_dir"),
                 "generated_at": payload.get("generated_at"),
                 "run_error": payload.get("run_error"),
+                # Provider-/runtime-level error classification produced
+                # by eval/runner.py:_classify_run_error. Rows with a
+                # non-None kind have pass=None metrics (skipped LLM
+                # judge) and are excluded from accuracy denominators
+                # via dropna(subset=["pass"]) downstream. Surfaced on
+                # the frame so the notebook can build a breakdown grid
+                # of how many runs are policy_refusal vs api_error vs
+                # max_turns_exceeded -- the "should re-run" signal.
+                "run_error_kind": payload.get("run_error_kind"),
+                "run_error_message": payload.get("run_error_message"),
                 "metrics": payload.get("metrics", {}),
                 "eval_path": str(path),
             }
@@ -92,6 +102,7 @@ def build_metric_run_frame(eval_df: pd.DataFrame) -> pd.DataFrame:
     records: list[dict[str, Any]] = []
     for row in eval_df.to_dict(orient="records"):
         metrics = row.get("metrics") or {}
+        run_error_kind = row.get("run_error_kind")
         for metric_name, metric_payload in metrics.items():
             pass_value = metric_payload.get("pass") if isinstance(metric_payload, dict) else None
             normalized_pass = pass_value if isinstance(pass_value, bool) else pd.NA
@@ -108,6 +119,7 @@ def build_metric_run_frame(eval_df: pd.DataFrame) -> pd.DataFrame:
                     "generated_at": row.get("generated_at"),
                     "metric_name": metric_name,
                     "pass": normalized_pass,
+                    "run_error_kind": run_error_kind,
                     "metric_payload": metric_payload,
                     "eval_path": row.get("eval_path"),
                 }
@@ -150,6 +162,7 @@ def build_metric_run_frame(eval_df: pd.DataFrame) -> pd.DataFrame:
                 "generated_at": row.get("generated_at"),
                 "metric_name": "combined",
                 "pass": combined_pass,
+                "run_error_kind": run_error_kind,
                 "metric_payload": {
                     "commit_check_pass": commit_pass,
                     "response_llm_judge_pass": judge_pass,
@@ -238,6 +251,16 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
     summary_df = pd.DataFrame(summary_records)
     if not summary_df.empty:
         summary_df["model_label"] = summary_df["provider"] + "/" + summary_df["model"]
+        # Force the four accuracy columns to float dtype. With no usable
+        # rows in a slice (e.g. every act run in a category is excluded
+        # as a run-level error), the per-cell value is pd.NA which makes
+        # the entire column `object` dtype -- seaborn's heatmap then
+        # fails with "Image data of dtype object cannot be converted to
+        # float". `pd.to_numeric(..., errors="coerce")` collapses pd.NA
+        # to np.nan and keeps the column float64.
+        for col in ("should_act_accuracy", "should_abstain_accuracy", "paired_accuracy", "car"):
+            if col in summary_df.columns:
+                summary_df[col] = pd.to_numeric(summary_df[col], errors="coerce")
     return summary_df.sort_values(
         by=["category", "action_type", "provider", "model", "metric_name"],
         kind="stable",
