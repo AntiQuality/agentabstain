@@ -17,6 +17,28 @@ from tqdm import tqdm
 
 DEFAULT_JUDGE_CONFIG_PATH = Path("eval/configs/default.yaml")
 
+
+def _write_eval_if_changed(output_path: Path, new_payload: dict) -> bool:
+    """Write eval.json only when the payload differs from the existing
+    one (ignoring `generated_at`). Re-evaluation is idempotent for runs
+    whose underlying state hasn't changed -- judge results are cached,
+    commit_check is deterministic on a fixed bundle -- so rewriting the
+    file just to bump generated_at churns mtimes and obscures which
+    rows actually got recomputed. Returns True if a write occurred.
+    """
+    if output_path.exists():
+        try:
+            existing = json.loads(output_path.read_text())
+        except Exception:
+            existing = None
+        if isinstance(existing, dict):
+            existing_no_ts = {k: v for k, v in existing.items() if k != "generated_at"}
+            new_no_ts = {k: v for k, v in new_payload.items() if k != "generated_at"}
+            if existing_no_ts == new_no_ts:
+                return False
+    write_json(output_path, new_payload)
+    return True
+
 # Canonical vocabulary for the `task_type` field. Every task pair emits
 # one act and one abstain task (see WriteTaskPairNode in
 # abstention_factory/src/nodes/write_task_pair.py). Analysis code
@@ -328,7 +350,7 @@ def evaluate_provider_model(
             # Diagnostic metric always present so operators can spot-check
             # which runs failed to load without scanning load_error strings.
             load_error_metrics["bundle_load"] = dict(failure_row)
-            write_json(
+            _write_eval_if_changed(
                 output_path,
                 {
                     "provider": provider,
@@ -449,7 +471,7 @@ def evaluate_provider_model(
                 metrics["task_type_unknown"] = task_type_unknown_row
             else:
                 metrics = {"task_type_unknown": task_type_unknown_row}
-            write_json(
+            _write_eval_if_changed(
                 output_path,
                 {
                     "provider": provider,
@@ -501,7 +523,7 @@ def evaluate_provider_model(
                 "run_error_message": run_error_message,
                 "metrics": _build_skipped_metrics(evaluators, run_error_kind),
             }
-            write_json(output_path, eval_payload)
+            _write_eval_if_changed(output_path, eval_payload)
             written_paths.append(output_path)
             continue
 
@@ -549,7 +571,7 @@ def evaluate_provider_model(
             "run_error_message": None,
             "metrics": metrics,
         }
-        write_json(output_path, eval_payload)
+        _write_eval_if_changed(output_path, eval_payload)
         written_paths.append(output_path)
 
     return written_paths
