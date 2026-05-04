@@ -60,6 +60,12 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
         user_id="user_default",
     )
 
+    usage_totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "events_with_usage": 0,
+    }
     try:
         try:
             events = runner.run_async(
@@ -72,6 +78,7 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
                 run_config=RunConfig(max_llm_calls=agent.max_turns),
             )
             async for event in events:
+                _accumulate_event_usage(event, usage_totals)
                 event_output = _extract_final_output_from_event(event)
                 if event_output is not None:
                     final_output = event_output
@@ -91,6 +98,13 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
         except BaseException:
             pass
 
+    provider_metadata: dict[str, Any] = {
+        "provider": "googleadk",
+        "model": agent.model,
+    }
+    if usage_totals["events_with_usage"] > 0:
+        provider_metadata["usage"] = usage_totals
+
     return build_task_run_result(
         agent=agent,
         bundle=bundle,
@@ -98,7 +112,31 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
         final_output=final_output,
         export_payload=export_payload,
         run_error=run_error,
+        provider_metadata=provider_metadata,
     )
+
+
+def _accumulate_event_usage(event: Any, totals: dict[str, int]) -> None:
+    """Sum google-adk per-event `usage_metadata` (gemini token counts)
+    into a running total. Schema field names follow Vertex's naming
+    (prompt_token_count / candidates_token_count / total_token_count).
+    Best-effort: any shape change just leaves totals at 0 and we keep going.
+    """
+    um = getattr(event, "usage_metadata", None)
+    if um is None:
+        return
+    try:
+        prompt = int(getattr(um, "prompt_token_count", 0) or 0)
+        out = int(getattr(um, "candidates_token_count", 0) or 0)
+        total = int(getattr(um, "total_token_count", 0) or 0)
+    except Exception:
+        return
+    if prompt == 0 and out == 0 and total == 0:
+        return
+    totals["input_tokens"] += prompt
+    totals["output_tokens"] += out
+    totals["total_tokens"] += total or (prompt + out)
+    totals["events_with_usage"] += 1
 
 
 def _extract_final_output_from_event(event: Any) -> str | None:

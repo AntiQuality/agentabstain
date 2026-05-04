@@ -601,6 +601,30 @@ def main() -> None:
         judge_config_path=args.judge_config,
         override_judge=args.override_judge,
     )
+
+    # Flush per-sweep judge token usage to token_usage/eval/ so headline
+    # cost rollups can attribute eval spend per provider/model. The
+    # write is a no-op when the judge had nothing to do (every eval row
+    # was cached and skipped).
+    try:
+        from abstention_factory.src.utils.token_usage import write_stage_usage
+        from abstention_factory.src.utils.call_llm import get_usage_summary
+
+        if get_usage_summary():
+            write_stage_usage(
+                stage=f"judge_{args.provider}_{args.model.replace('/', '_')}",
+                extra={
+                    "provider": args.provider,
+                    "model": args.model,
+                    "evaluated_runs": len(written_paths),
+                    "override_judge": args.override_judge,
+                },
+                subdir="eval",
+            )
+    except Exception:
+        # Never let usage bookkeeping break an eval sweep.
+        pass
+
     print(
         json.dumps(
             {

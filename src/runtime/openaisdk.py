@@ -89,6 +89,7 @@ async def run_openai_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path)
         tool_filter={"blocked_tool_names": [RUNTIME_EXPORT_TOOL_NAME]},
     )
 
+    usage_metadata: dict[str, Any] | None = None
     try:
         await server.connect()
         sdk_agent = Agent(
@@ -105,6 +106,7 @@ async def run_openai_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path)
                 max_turns=agent.max_turns,
             )
             final_output = coerce_final_output(run_result.final_output)
+            usage_metadata = _extract_usage_metadata(run_result)
         except Exception as exc:
             run_error = str(exc)
 
@@ -120,6 +122,13 @@ async def run_openai_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path)
         except BaseException:
             pass
 
+    provider_metadata: dict[str, Any] = {
+        "provider": "openaisdk",
+        "model": agent.model,
+    }
+    if usage_metadata is not None:
+        provider_metadata["usage"] = usage_metadata
+
     return build_task_run_result(
         agent=agent,
         bundle=bundle,
@@ -127,7 +136,41 @@ async def run_openai_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path)
         final_output=final_output,
         export_payload=export_payload,
         run_error=run_error,
+        provider_metadata=provider_metadata,
     )
+
+
+def _extract_usage_metadata(run_result: Any) -> dict[str, Any] | None:
+    """Pull aggregate token usage out of an openai-agents RunResult.
+
+    The Runner exposes per-call `ModelResponse.usage` under `raw_responses`;
+    we sum across responses since a single rollout typically issues several
+    calls (one per turn). Returning None when the SDK shape changes keeps
+    rollouts resilient — usage is bookkeeping, not a hard dependency.
+    """
+    try:
+        responses = getattr(run_result, "raw_responses", None) or []
+        total_in = 0
+        total_out = 0
+        total_tokens = 0
+        n_requests = 0
+        for resp in responses:
+            usage = getattr(resp, "usage", None)
+            if usage is None:
+                continue
+            total_in += int(getattr(usage, "input_tokens", 0) or 0)
+            total_out += int(getattr(usage, "output_tokens", 0) or 0)
+            total_tokens += int(getattr(usage, "total_tokens", 0) or 0)
+            n_requests += int(getattr(usage, "requests", 0) or 1)
+        return {
+            "input_tokens": total_in,
+            "output_tokens": total_out,
+            "total_tokens": total_tokens or (total_in + total_out),
+            "requests": n_requests,
+            "num_responses": len(responses),
+        }
+    except Exception:
+        return None
 
 
 async def _export_runtime_snapshot(server: MCPServerStdio) -> dict[str, Any]:
