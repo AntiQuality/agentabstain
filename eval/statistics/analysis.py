@@ -26,10 +26,20 @@ SUMMARY_COLUMNS = [
 
 def discover_eval_paths(results_root: str | Path = "results") -> list[Path]:
     root = Path(results_root)
-    # Two layouts coexist:
-    #   provider/model/category/task/type/run/eval.json (6 levels)
-    #   provider/runtime/model/category/task/type/run/eval.json (7 levels, e.g. openclaw/amazon-bedrock/...)
-    return sorted({*root.glob("*/*/*/*/*/*/eval.json"), *root.glob("*/*/*/*/*/*/*/eval.json")})
+    # Three layouts coexist; the trailing 4 components are always
+    # `<category>/<task>/<type>/<run>/eval.json`. The provider+model
+    # prefix varies by runtime:
+    #   provider/model/<...>/eval.json                     (6 levels) — claudesdk, openaisdk, googleadk
+    #   provider/runtime/model/<...>/eval.json             (7 levels) — openclaw/amazon-bedrock/<model>
+    #   provider/runtime/vendor/model/<...>/eval.json      (8 levels) — openclaw/openrouter/deepseek/deepseek-v4-pro
+    # The 8-level case appears when the canonical model id itself
+    # contains a `/` (openrouter publishes `<vendor>/<model>` ids), so
+    # the artifact path gains one extra component vs the bedrock case.
+    return sorted({
+        *root.glob("*/*/*/*/*/*/eval.json"),
+        *root.glob("*/*/*/*/*/*/*/eval.json"),
+        *root.glob("*/*/*/*/*/*/*/*/eval.json"),
+    })
 
 
 def load_eval_frame(results_root: str | Path = "results") -> pd.DataFrame:
