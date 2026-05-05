@@ -256,19 +256,19 @@ def evaluate_provider_model(
     results_root: str | Path,
     judge_config_path: str | Path,
     override_judge: bool = False,
+    workers: int = 1,
 ) -> list[Path]:
+    """Evaluate every run under (provider, model). When workers>1, dispatches
+    per-run evaluation via ThreadPoolExecutor; per-run logic is identical
+    -- threads are safe because every run writes its own eval.json (no
+    shared output path) and the OpenAI/Anthropic SDK clients used by the
+    LLM judge are thread-safe (they are HTTP clients with their own
+    connection pools)."""
     config = EvaluationConfig.from_yaml(judge_config_path)
     evaluators = build_evaluators(config)
-    written_paths: list[Path] = []
     run_result_paths = discover_run_result_paths(results_root, provider, model)
-    progress = tqdm(
-        run_result_paths,
-        desc=f"evaluating {provider}/{model}",
-        unit="run",
-        leave=True,
-    )
 
-    for run_result_path in progress:
+    def _process_one(run_result_path: Path) -> Path | None:
         try:
             bundle = load_evaluation_bundle(run_result_path, provider=provider, model=model)
         except Exception as exc:
@@ -370,12 +370,9 @@ def evaluate_provider_model(
                     "metrics": load_error_metrics,
                 },
             )
-            written_paths.append(output_path)
-            continue
-        progress.set_postfix_str(
-            f"{bundle.category}/{bundle.task_id}/{bundle.task_type}/{bundle.run_id}",
-            refresh=False,
-        )
+            return output_path
+        # progress.set_postfix_str dropped: under threadpool dispatch the
+        # outer loop owns tqdm; per-task postfix is not meaningful.
         # Successful-load identity handling:
         #   (1) Happy path -- path canonical AND task_dir agrees:
         #       bundle came from the task the slot claims. Run
@@ -490,8 +487,7 @@ def evaluate_provider_model(
                     "metrics": metrics,
                 },
             )
-            written_paths.append(output_path)
-            continue
+            return output_path
         output_path = bundle.artifact_dir / "eval.json"
         existing_payload = None
         if output_path.exists():
@@ -524,8 +520,7 @@ def evaluate_provider_model(
                 "metrics": _build_skipped_metrics(evaluators, run_error_kind),
             }
             _write_eval_if_changed(output_path, eval_payload)
-            written_paths.append(output_path)
-            continue
+            return output_path
 
         metrics: dict[str, dict] = {}
         for evaluator in evaluators:
@@ -572,7 +567,40 @@ def evaluate_provider_model(
             "metrics": metrics,
         }
         _write_eval_if_changed(output_path, eval_payload)
-        written_paths.append(output_path)
+        return output_path
+
+    written_paths: list[Path] = []
+    if workers and workers > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        with ThreadPoolExecutor(max_workers=workers) as ex:
+            futures = {ex.submit(_process_one, p): p for p in run_result_paths}
+            for fut in tqdm(
+                as_completed(futures),
+                total=len(futures),
+                desc=f"evaluating {provider}/{model}",
+                unit="run",
+                leave=True,
+            ):
+                try:
+                    out = fut.result()
+                except Exception as exc:
+                    # _process_one swallows per-evaluator exceptions; an
+                    # uncaught one here means the helper itself crashed.
+                    # Log and skip rather than abort the whole sweep.
+                    print(f"[eval] helper crash for {futures[fut]}: {exc}")
+                    continue
+                if out is not None:
+                    written_paths.append(out)
+    else:
+        for p in tqdm(
+            run_result_paths,
+            desc=f"evaluating {provider}/{model}",
+            unit="run",
+            leave=True,
+        ):
+            out = _process_one(p)
+            if out is not None:
+                written_paths.append(out)
 
     return written_paths
 
@@ -592,6 +620,12 @@ def main() -> None:
         action="store_true",
         help="Re-run response_llm_judge even if eval.json already contains judge results",
     )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Concurrent per-run evaluations via ThreadPoolExecutor (default 1, sequential).",
+    )
     args = parser.parse_args()
 
     written_paths = evaluate_provider_model(
@@ -600,6 +634,7 @@ def main() -> None:
         results_root=args.results_root,
         judge_config_path=args.judge_config,
         override_judge=args.override_judge,
+        workers=args.workers,
     )
 
     # Flush per-sweep judge token usage to token_usage/eval/ so headline

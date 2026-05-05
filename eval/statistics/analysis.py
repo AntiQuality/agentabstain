@@ -25,7 +25,11 @@ SUMMARY_COLUMNS = [
 
 
 def discover_eval_paths(results_root: str | Path = "results") -> list[Path]:
-    return sorted(Path(results_root).glob("*/*/*/*/*/*/eval.json"))
+    root = Path(results_root)
+    # Two layouts coexist:
+    #   provider/model/category/task/type/run/eval.json (6 levels)
+    #   provider/runtime/model/category/task/type/run/eval.json (7 levels, e.g. openclaw/amazon-bedrock/...)
+    return sorted({*root.glob("*/*/*/*/*/*/eval.json"), *root.glob("*/*/*/*/*/*/*/eval.json")})
 
 
 def load_eval_frame(results_root: str | Path = "results") -> pd.DataFrame:
