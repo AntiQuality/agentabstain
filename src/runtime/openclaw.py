@@ -3,25 +3,36 @@
 OpenClaw (https://openclaw.ai) is invoked as a subprocess (`openclaw agent
 --local --json`). For each rollout we:
 
-1. Register a per-rollout entry under the global `mcp.servers.<name>`
-   slot pointing at our task MCP server, with `RUNTIME_STATE_DUMP_PATH`
-   in the server env so the server writes state + execution_log to a
-   file we can read after.
-2. Patch a per-rollout `agents.list[]` entry that:
+1. Allocate a per-rollout OpenClaw profile (`--profile abstain_<rollout_id>`)
+   so all openclaw state -- agents.list, mcp.servers, sessions, logs --
+   lives at `~/.openclaw-abstain_<rollout_id>/` and never overlaps with
+   other rollouts or the user's interactive openclaw config. This is
+   what makes concurrent rollouts safe: bundle-mcp's plugin loader
+   reads `mcp.servers` from the active profile only, so it cannot leak
+   tools across rollouts (tools share `pluginId="bundle-mcp"` so any
+   global registration would be visible to every concurrent agent via
+   the `tools.alsoAllow=["bundle-mcp"]` allow-list, which there's no
+   way to scope at the policy layer).
+2. Register a `mcp.servers.<name>` entry in this profile pointing at
+   our task MCP server, with `RUNTIME_STATE_DUMP_PATH` in the server
+   env so the server writes state + execution_log to a file we can
+   read after.
+3. Patch a per-rollout `agents.list[]` entry that:
    - Pins `model` to the Bedrock id (e.g. `amazon-bedrock/moonshotai.kimi-k2.5`).
    - Sets `tools.profile=minimal` + `tools.alsoAllow=["bundle-mcp"]` so
      the agent only sees our MCP tools (plus session_status, which is
      unavoidable but inert).
    - Uses an isolated empty workspace (no AGENTS.md/SOUL.md/etc.).
    - Sets `skills: []` so no skill bootstrap is injected.
-3. Invokes `openclaw agent --local --agent <id> --message <instruction>
-   --json --timeout <T>` with a clean env that only carries
-   AWS_BEARER_TOKEN_BEDROCK + AWS_REGION (we explicitly omit
-   AWS_ACCESS_KEY_ID/SECRET so OpenClaw routes via the Bedrock bearer
-   token, leaving the SigV4 keys free for claude code sdk).
-4. Reads the state dump file the MCP server wrote, plus the
+4. Invokes `openclaw --profile <p> agent --local --agent <id>
+   --message <instruction> --json --timeout <T>` with a clean env that
+   only carries AWS_BEARER_TOKEN_BEDROCK + AWS_REGION (we explicitly
+   omit AWS_ACCESS_KEY_ID/SECRET so OpenClaw routes via the Bedrock
+   bearer token, leaving the SigV4 keys free for claude code sdk).
+5. Reads the state dump file the MCP server wrote, plus the
    `OPENCLAW_TRAJECTORY_DIR/<sessionId>.trajectory.jsonl` file.
-5. Cleans up: removes the per-rollout entries from openclaw.json.
+6. Cleans up: removes the entire `~/.openclaw-abstain_<rollout_id>/`
+   profile dir. No global config touched.
 """
 
 from __future__ import annotations
@@ -57,11 +68,11 @@ OPENCLAW_DEFAULT_AGENT_TIMEOUT = 300
 async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path) -> TaskRunResult:
     artifact_dir = agent.build_artifact_dir(bundle.category, bundle.task_id, bundle.task_type)
 
-    # Per-rollout unique handles. OpenClaw's mcp.servers and agents.list
-    # are global, so concurrent rollouts must not collide.
     rollout_id = secrets.token_hex(6)
+    profile_name = f"abstain_{rollout_id}"
     mcp_server_name = f"abstain_{rollout_id}"
     agent_id = f"abstain_agent_{rollout_id}"
+    profile_dir = Path.home() / f".openclaw-{profile_name}"
     sandbox_workspace = Path("/tmp") / f"openclaw_workspace_{rollout_id}"
     sandbox_agent_dir = Path("/tmp") / f"openclaw_agentdir_{rollout_id}"
     state_dump_path = artifact_dir / "state_dump.json"
@@ -122,11 +133,12 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
     }
 
     try:
-        await _register_mcp_server(mcp_server_name, server_payload)
-        await _add_agent_entry(agent_entry)
+        await _register_mcp_server(profile_name, mcp_server_name, server_payload)
+        await _add_agent_entry(profile_name, agent_entry)
 
         try:
             run_outcome = await _invoke_openclaw_agent(
+                profile_name=profile_name,
                 agent_id=agent_id,
                 instruction=bundle.task_yaml["instruction"],
                 trajectory_dir=trajectory_dir,
@@ -147,17 +159,11 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
                 raise
             run_error = f"{run_error}; state dump read failed: {exc}"
     finally:
-        try:
-            await _unregister_mcp_server(mcp_server_name)
-        except Exception:
-            pass
-        try:
-            await _remove_agent_entry(agent_id)
-        except Exception:
-            pass
-        # Per-rollout sandboxes are cheap and short-lived; clean up to
-        # keep /tmp tidy under high-fanout runs.
-        for path in (sandbox_workspace, sandbox_agent_dir):
+        # Profile dir is the source of truth for openclaw state. Removing
+        # it cleans up agents.list, mcp.servers, sessions, and logs in
+        # one shot -- no per-key unset needed and no chance of leaking
+        # global state on kill -9.
+        for path in (profile_dir, sandbox_workspace, sandbox_agent_dir):
             try:
                 shutil.rmtree(path)
             except Exception:
@@ -185,9 +191,13 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
     )
 
 
-async def _register_mcp_server(name: str, payload: dict[str, Any]) -> None:
+def _profile_args(profile_name: str) -> list[str]:
+    return [OPENCLAW_BIN, "--profile", profile_name]
+
+
+async def _register_mcp_server(profile_name: str, name: str, payload: dict[str, Any]) -> None:
     proc = await asyncio.create_subprocess_exec(
-        OPENCLAW_BIN, "mcp", "set", name, json.dumps(payload),
+        *_profile_args(profile_name), "mcp", "set", name, json.dumps(payload),
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
@@ -199,66 +209,25 @@ async def _register_mcp_server(name: str, payload: dict[str, Any]) -> None:
         )
 
 
-async def _unregister_mcp_server(name: str) -> None:
-    proc = await asyncio.create_subprocess_exec(
-        OPENCLAW_BIN, "mcp", "unset", name,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    await proc.communicate()
+async def _add_agent_entry(profile_name: str, entry: dict[str, Any]) -> None:
+    """Write the per-rollout agent entry to the per-profile config.
 
-
-async def _add_agent_entry(entry: dict[str, Any]) -> None:
-    """Append `entry` to agents.list via `openclaw config patch`.
-
-    OpenClaw's `patch` defaults to merging arrays only when the result
-    keeps every existing id (`Refusing to replace agents.list; it would
-    remove existing entries: ...`). Since we read the current list and
-    write a superset (existing entries minus a same-id stale entry,
-    plus our new one), the regular semantics may still trip when our
-    entry shares an id with a partial-state leftover from a prior
-    crash. Pass `--replace-path agents.list` so the array is replaced
-    intentionally.
+    With per-profile state isolation (`--profile abstain_<rollout_id>`),
+    `agents.list` starts empty for each rollout, so we just write
+    `[entry]` directly. Pass `--replace-path agents.list` so openclaw's
+    array-merge guardrail (which refuses to drop existing ids) doesn't
+    kick in if the profile dir was somehow pre-populated.
     """
-    current = await _read_agents_list()
-    new_list = [e for e in current if e.get("id") != entry["id"]] + [entry]
-    patch = {"agents": {"list": new_list}}
-    await _config_patch(patch, replace_paths=["agents.list"])
+    patch = {"agents": {"list": [entry]}}
+    await _config_patch(profile_name, patch, replace_paths=["agents.list"])
 
 
-async def _remove_agent_entry(agent_id: str) -> None:
-    current = await _read_agents_list()
-    pruned = [e for e in current if e.get("id") != agent_id]
-    if pruned == current:
-        return
-    if not pruned:
-        # OpenClaw schema requires at least one entry; fall back to a
-        # bare `main` placeholder so the file remains valid.
-        pruned = [{"id": "main"}]
-    await _config_patch({"agents": {"list": pruned}}, replace_paths=["agents.list"])
-
-
-async def _read_agents_list() -> list[dict[str, Any]]:
-    proc = await asyncio.create_subprocess_exec(
-        OPENCLAW_BIN, "config", "get", "agents.list", "--json",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await proc.communicate()
-    if proc.returncode != 0:
-        raise RuntimeError(
-            f"openclaw config get agents.list failed (rc={proc.returncode}): "
-            f"{stderr.decode(errors='replace')[-1000:]}"
-        )
-    raw = stdout.decode(errors="replace").strip() or "[]"
-    parsed = json.loads(raw)
-    if not isinstance(parsed, list):
-        raise RuntimeError(f"unexpected agents.list payload: {parsed!r}")
-    return parsed
-
-
-async def _config_patch(patch: dict[str, Any], replace_paths: list[str] | None = None) -> None:
-    args = [OPENCLAW_BIN, "config", "patch", "--stdin"]
+async def _config_patch(
+    profile_name: str,
+    patch: dict[str, Any],
+    replace_paths: list[str] | None = None,
+) -> None:
+    args = [*_profile_args(profile_name), "config", "patch", "--stdin"]
     for rp in replace_paths or []:
         args.extend(["--replace-path", rp])
     proc = await asyncio.create_subprocess_exec(
@@ -276,6 +245,7 @@ async def _config_patch(patch: dict[str, Any], replace_paths: list[str] | None =
 
 
 async def _invoke_openclaw_agent(
+    profile_name: str,
     agent_id: str,
     instruction: str,
     trajectory_dir: Path,
@@ -291,7 +261,8 @@ async def _invoke_openclaw_agent(
     env["OPENCLAW_TRAJECTORY_DIR"] = str(trajectory_dir)
 
     args = [
-        OPENCLAW_BIN, "agent",
+        *_profile_args(profile_name),
+        "agent",
         "--local",
         "--agent", agent_id,
         "--message", instruction,
@@ -333,14 +304,28 @@ async def _invoke_openclaw_agent(
     except json.JSONDecodeError as exc:
         return {"error": f"could not parse openclaw JSON: {exc}; raw={raw[:1000]}", "final_output": None}
 
+    meta = envelope.get("meta") or {}
     payloads = envelope.get("payloads") or []
     final_output = None
-    if payloads and isinstance(payloads, list):
-        first = payloads[0]
-        if isinstance(first, dict):
-            final_output = first.get("text")
+    # OpenClaw's payloads array is the per-turn sequence of assistant
+    # outputs in chronological order, so payloads[0] is typically the
+    # pre-tool-call preamble ("Let me check...") rather than the answer.
+    # `meta.finalAssistantVisibleText` is openclaw's own designation of
+    # the rendered final answer; fall back to the last payload, then
+    # the first, only if it's missing.
+    if isinstance(meta, dict):
+        candidate = meta.get("finalAssistantVisibleText")
+        if isinstance(candidate, str) and candidate:
+            final_output = candidate
+    if final_output is None and isinstance(payloads, list) and payloads:
+        for entry in reversed(payloads):
+            if isinstance(entry, dict):
+                text = entry.get("text")
+                if isinstance(text, str) and text:
+                    final_output = text
+                    break
 
-    meta = envelope.get("meta") or {}
+
     session_id = None
     agent_meta = meta.get("agentMeta") if isinstance(meta, dict) else None
     if isinstance(agent_meta, dict):

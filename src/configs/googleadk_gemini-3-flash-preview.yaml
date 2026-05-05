@@ -1,0 +1,5 @@
+provider: "googleadk"
+model: "gemini-3-flash-preview"
+temperature: 0.0
+max_turns: 30
+results_root: "results/googleadk"

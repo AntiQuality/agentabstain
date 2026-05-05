@@ -1,0 +1,5 @@
+provider: "openaisdk"
+model: "gpt-5.1-2025-11-13"
+temperature: Null
+max_turns: 30
+results_root: "results/openaisdk"

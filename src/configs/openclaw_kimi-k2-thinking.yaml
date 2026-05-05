@@ -1,5 +1,0 @@
-provider: "openclaw"
-model: "amazon-bedrock/moonshot.kimi-k2-thinking"
-temperature: 0.0
-max_turns: 30
-results_root: "results/openclaw"

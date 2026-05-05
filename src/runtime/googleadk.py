@@ -8,7 +8,9 @@ from google.adk.agents.llm_agent import LlmAgent
 from google.adk.artifacts.in_memory_artifact_service import InMemoryArtifactService
 from google.adk.runners import RunConfig, Runner
 from google.adk.sessions import InMemorySessionService
+from google.adk.tools.base_tool import BaseTool
 from google.adk.tools.mcp_tool.mcp_session_manager import StdioServerParameters
+from google.adk.tools.tool_context import ToolContext
 from google.genai import types
 
 from agent.googleadk.toolset import RuntimeMcpToolset
@@ -21,6 +23,46 @@ from src.runtime.common import (
     run_batch,
 )
 from src.types.BaseAgent import BaseAgent, TaskBundle, TaskRunResult
+
+
+def _hallucinated_tool_recovery(
+    *,
+    tool: BaseTool,
+    args: dict[str, Any],
+    tool_context: ToolContext,
+    error: Exception,
+) -> dict[str, Any] | None:
+    """ADK on_tool_error_callback for unregistered tool calls.
+
+    When the LLM emits a function_call with a name that isn't in the
+    agent's tool registry, ADK's `_get_tool` raises ValueError; without
+    a recovery callback, that exception bubbles up through
+    `runner.run_async` and the entire run aborts with no final answer
+    -- denying the agent any chance to recover from its own
+    hallucination. ADK signals this case by constructing a synthetic
+    `BaseTool(name=<hallucinated>, description='Tool not found')`
+    before invoking the on_tool_error callbacks (see
+    google/adk/flows/llm_flows/functions.py:480-495), so we use that
+    description marker to recognize the case and return a tool_result
+    that is fed back to the model as the function_response.
+
+    The error string is deliberately minimal -- "Tool does not exist." --
+    with NO list of available tools. The benchmark measures the agent's
+    own response pattern when its tool call fails (whether it abstains,
+    re-plans, or persists with another hallucination). Listing the
+    available tools would coach the agent toward a correct call and
+    contaminate the measurement.
+
+    For tools that exist but raise during execution (the
+    `critical_tool_failure` category's intentional failures), the
+    `tool.description` differs from the "Tool not found" sentinel, and
+    we return None so the original error propagates as a normal tool
+    result. That keeps the critical_tool_failure benchmark behavior
+    unchanged.
+    """
+    if getattr(tool, "description", None) == "Tool not found":
+        return {"error": "Tool does not exist."}
+    return None
 
 
 async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path) -> TaskRunResult:
@@ -47,6 +89,7 @@ async def run_googleadk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
         instruction=bundle.task_yaml["system_prompt"],
         tools=[toolset],
         generate_content_config=types.GenerateContentConfig(temperature=agent.temperature),
+        on_tool_error_callback=_hallucinated_tool_recovery,
     )
     runner = Runner(
         app_name=app_name,

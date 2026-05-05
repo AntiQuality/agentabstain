@@ -1,5 +1,5 @@
 provider: "openclaw"
-model: "amazon-bedrock/qwen.qwen3-32b-v1:0"
+model: "amazon-bedrock/minimax.minimax-m2.5"
 temperature: 0.0
 max_turns: 30
 results_root: "results/openclaw"
