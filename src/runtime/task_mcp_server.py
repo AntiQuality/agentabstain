@@ -18,6 +18,15 @@ from src.types.BaseAgent import BaseAgent
 # the runtime can read it after the agent finishes.
 RUNTIME_STATE_DUMP_PATH_ENV = "RUNTIME_STATE_DUMP_PATH"
 
+# Optional MCP-side env-name alias map. Runtimes whose tool-registry hard-caps
+# tool names (e.g. openclaw + Bedrock at 64 chars) set this to expose tools
+# under short prefixes like "industrial.event_presentation_launcher" instead
+# of "industrial_and_infrastructure_control.event_presentation_launcher",
+# avoiding collision-suffix soup like "industrial_and_infrastructure_control-ev-3".
+# Keys are full env names; values are short aliases. Internal state keys and
+# execution_log entries continue to use full env names.
+RUNTIME_ENV_ALIASES_ENV = "RUNTIME_ENV_ALIASES_JSON"
+
 
 def _serialize(value: Any) -> Any:
     if hasattr(value, "to_dict") and callable(value.to_dict):
@@ -37,7 +46,28 @@ async def main() -> None:
     args = parser.parse_args()
 
     bundle = BaseAgent.load_task_bundle(args.category, args.task_id, args.task_type)
-    menv = build_multi_environment(bundle.env_types, bundle.initial_states)
+
+    env_aliases: dict[str, str] | None = None
+    aliases_raw = os.environ.get(RUNTIME_ENV_ALIASES_ENV)
+    if aliases_raw:
+        try:
+            parsed = json.loads(aliases_raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(
+                f"{RUNTIME_ENV_ALIASES_ENV} must be valid JSON: {exc}"
+            ) from exc
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"{RUNTIME_ENV_ALIASES_ENV} must decode to a dict, got {type(parsed).__name__}"
+            )
+        # Only forward aliases for envs this task actually uses; the runtime
+        # may set a global alias map but we shouldn't trip the unknown-env
+        # check in MultiEnvironment for entries that don't apply here.
+        env_aliases = {k: v for k, v in parsed.items() if k in bundle.env_types}
+
+    menv = build_multi_environment(
+        bundle.env_types, bundle.initial_states, env_aliases=env_aliases
+    )
 
     # Apply declarative tool overrides — tool names in the artifact are
     # already namespaced (e.g. "email.read_email"); abreak_tool splits and

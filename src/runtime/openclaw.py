@@ -64,11 +64,73 @@ OPENCLAW_BIN = os.environ.get("OPENCLAW_BIN", "openclaw")
 # Top-level config-key timeouts.
 OPENCLAW_DEFAULT_AGENT_TIMEOUT = 300
 
+# Short aliases used for the MCP-exposed tool namespace prefix when running
+# under openclaw. OpenClaw sanitizes & truncates tool names to 64 chars total
+# (`<server>__<env-tool>`) for Bedrock-safety; with the canonical 12-hex
+# rollout id our serverName is 20 chars, leaving 42 chars for `<env-tool>`.
+# Long env names (e.g. `industrial_and_infrastructure_control` at 37 chars)
+# devour that budget and force per-tool collision suffixes (`-ev-2`, `-ev-3`,
+# ...) that the model can't reproduce. Aliasing here keeps the agent-visible
+# names short and reproducible while internal state keys, execution_log
+# entries, and DAG `critical_actions` all keep the canonical full env name.
+# Pair this with the 8-hex rollout id below (serverName=16 chars → 46-char
+# tool-fragment budget) and every `<alias>.<func>` fits without truncation.
+OPENCLAW_ENV_ALIASES: dict[str, str] = {
+    "agriculture_and_yield": "agri",
+    "astrology_charting": "astro",
+    "autonomous_delivery_and_routing": "adr",
+    "calendar": "cal",
+    "chat_and_group_management": "chat",
+    "clinical_records_and_claims": "clinical",
+    "compliance_and_contracts": "compl",
+    "consumer_banking": "bank",
+    "consumer_health_portal": "health",
+    "crm_and_company_lookup": "crm",
+    "device_privacy_and_focus": "device",
+    "disaster_relief_operations": "disaster",
+    "document_authoring_and_publication": "docpub",
+    "documents_and_analysis": "docs",
+    "education_and_campus_portals": "edu",
+    "filesystem": "fs",
+    "fitness_and_wellness_logs": "fitness",
+    "flight_and_travel_management": "travel",
+    "gmail_and_email_records": "gmail",
+    "home_medication_inventory": "med",
+    "identity_credit_and_collections": "identity",
+    "industrial_and_infrastructure_control": "industrial",
+    "maps_and_navigation": "maps",
+    "metrics_and_spreadsheet_analysis": "metrics",
+    "notes_and_reference": "notes",
+    "personal_profile_and_contacts": "profile",
+    "phone_and_messages": "phone",
+    "project_logs": "projlogs",
+    "retail_orders": "retail",
+    "science_and_environment_data": "science",
+    "security_and_privacy_admin": "security",
+    "smart_home": "smart",
+    "social_media_dataset_analysis": "social",
+    "spotify": "spotify",
+    "store_procurement_and_inventory": "store",
+    "system_operations": "sysops",
+    "trading_and_portfolio": "trading",
+    "vehicle_status_and_control": "vehicle",
+    "venmo_and_shared_expenses": "venmo",
+    "weather_and_alerts": "weather",
+    "web_and_cms": "web",
+    "workforce_and_hr": "workforce",
+}
+
 
 async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Path) -> TaskRunResult:
     artifact_dir = agent.build_artifact_dir(bundle.category, bundle.task_id, bundle.task_type)
 
-    rollout_id = secrets.token_hex(6)
+    # 8-hex (vs the previous 12-hex) shortens serverName from 20 to 16 chars,
+    # which raises the per-tool name budget from 42 to 46 chars after openclaw's
+    # 64-char total cap — enough for every `<alias>.<func>` to fit without the
+    # collision-suffix soup we saw with full env names. 8 hex (~4.3B values) is
+    # plenty unique within the lifetime of one batch (only simultaneous active
+    # rollouts collide-risk; profile dirs are deleted in `finally`).
+    rollout_id = secrets.token_hex(4)
     profile_name = f"abstain_{rollout_id}"
     mcp_server_name = f"abstain_{rollout_id}"
     agent_id = f"abstain_agent_{rollout_id}"
@@ -109,6 +171,9 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
             # Forward PYTHONPATH so the spawned server can import
             # `src.runtime.task_mcp_server` even when openclaw cwd is elsewhere.
             "PYTHONPATH": str(repo_root),
+            # Enable openclaw-specific MCP-side env aliasing so tool names fit
+            # under Bedrock's 64-char cap; see OPENCLAW_ENV_ALIASES above.
+            "RUNTIME_ENV_ALIASES_JSON": json.dumps(OPENCLAW_ENV_ALIASES),
         },
     }
 
