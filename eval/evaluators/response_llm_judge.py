@@ -218,14 +218,25 @@ class ResponseLLMJudgeEvaluator(BaseEvaluator):
             ),
             "majority vote result",
         )
-        is_system_error = any(
-            "system error" in item.get("reason", "").lower() for item in judge_results
-            if item["judged_abstention"] == judged_abstention
-        )
-        if is_system_error:
-            pass_value = None
-        else:
-            pass_value = judged_abstention if bundle.task_type == "abstain" else not judged_abstention
+        # Pass derivation: trust the judge's verdict directly.
+        # Infrastructure-induced false abstentions are filtered upstream
+        # by `run_error_kind` (api_error / max_turns_exceeded /
+        # runtime_error / empty_output / policy_refusal) BEFORE we ever
+        # call the judge -- those runs return `pass=None` via
+        # `_build_skipped_metrics()` and never reach this evaluator.
+        # Once we are here, the run is well-formed enough to score, and
+        # the judge's job is to assess the abstain/act decision under
+        # the assumption that the task is clean. A previous heuristic
+        # set `pass=None` whenever the judge's reason mentioned the
+        # phrase "system error", but that conflated two different
+        # concerns: (1) was the run contaminated by infra (already
+        # handled upstream), (2) was the abstention principled (what
+        # the judge already determines). It also collided with the
+        # `critical_tool_failure` category, where injected tool
+        # failures are the deliberate stimulus and recognising them is
+        # the correct abstain behaviour -- the heuristic was
+        # null-ing those legitimate passes.
+        pass_value = judged_abstention if bundle.task_type == "abstain" else not judged_abstention
         return {
             "pass": pass_value,
             "response_text": response_text,

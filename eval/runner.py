@@ -94,13 +94,30 @@ def _classify_run_error(run_result):
     if is_error_flag is True:
         if "Usage Policy" in final_output or "violate our Usage Policy" in final_output:
             return ("policy_refusal", final_output[:200])
+        # Claude SDK encodes max_turns exhaustion via the structured
+        # `result_message.subtype` field instead of the top-level `error`
+        # string. Treat that consistently with other agents' max-turns
+        # classification so analysis sees a uniform run_error_kind.
+        rm_subtype = rm.get("subtype") if isinstance(rm, dict) else None
+        if isinstance(rm_subtype, str) and "max_turns" in rm_subtype.lower():
+            return ("max_turns_exceeded", final_output[:200] or f"is_error=True subtype={rm_subtype}")
         return ("api_error", final_output[:200] or "is_error=True with empty message")
 
     top_error = run_result.get("error")
     if top_error:
         msg = str(top_error)
         low = msg.lower()
-        if "max turn" in low or "max_turns" in low:
+        if (
+            "max turn" in low
+            or "max_turns" in low
+            # GoogleADK uses RunConfig(max_llm_calls=N) and surfaces
+            # exhaustion as "Max number of llm calls limit of `30` exceeded".
+            # Same semantics as max_turns: agent ran out of budget without
+            # producing a final answer; classify together so analysis
+            # treats them uniformly.
+            or "max number of llm calls" in low
+            or "max_llm_calls" in low
+        ):
             return ("max_turns_exceeded", msg[:200])
         if (
             "rate limit" in low
