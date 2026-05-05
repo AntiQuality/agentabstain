@@ -61,6 +61,35 @@ from src.types.BaseAgent import BaseAgent, TaskBundle, TaskRunResult
 # Default openclaw CLI binary; users on a custom path can override.
 OPENCLAW_BIN = os.environ.get("OPENCLAW_BIN", "openclaw")
 
+
+def _load_provider_dotenvs() -> None:
+    """Pull provider API keys from per-provider dotenv files at import time.
+
+    Some non-Bedrock upstreams (currently OpenRouter) read their key from a
+    `.<provider>.env` file the user keeps out of shell rc, e.g.
+    `.open_router.env` with `OPENROUTER_API_KEY=...`. We surface them into
+    `os.environ` so openclaw's `{source: env, id: ...}` apiKey resolution
+    works without each runner script having to `set -a; source ...`.
+    Existing exported values win — we never overwrite.
+    """
+    repo_root = Path(__file__).resolve().parents[2]
+    for filename in (".open_router.env",):
+        path = repo_root / filename
+        if not path.exists():
+            continue
+        for raw in path.read_text().splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, value = line.partition("=")
+            key = key.strip()
+            value = value.strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+
+
+_load_provider_dotenvs()
+
 # Top-level config-key timeouts.
 OPENCLAW_DEFAULT_AGENT_TIMEOUT = 300
 
@@ -177,11 +206,10 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
         },
     }
 
-    model_ref = (
-        agent.model
-        if agent.model.startswith("amazon-bedrock/")
-        else f"amazon-bedrock/{agent.model}"
-    )
+    # Honor an explicit `<provider>/<model>` prefix (e.g. `openrouter/...`,
+    # `fireworks/...`); only fall back to `amazon-bedrock/` when bare.
+    model_ref = agent.model if "/" in agent.model else f"amazon-bedrock/{agent.model}"
+    upstream_provider = model_ref.split("/", 1)[0]
 
     agent_entry: dict[str, Any] = {
         "id": agent_id,
@@ -200,6 +228,7 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
     try:
         await _register_mcp_server(profile_name, mcp_server_name, server_payload)
         await _add_agent_entry(profile_name, agent_entry)
+        _check_provider_credentials(upstream_provider)
 
         try:
             run_outcome = await _invoke_openclaw_agent(
@@ -271,6 +300,36 @@ async def _register_mcp_server(profile_name: str, name: str, payload: dict[str, 
         raise RuntimeError(
             f"openclaw mcp set failed (rc={proc.returncode}): "
             f"{stderr.decode(errors='replace')[-2000:]}"
+        )
+
+
+# Map openclaw upstream-provider id → env var that openclaw auto-detects
+# at request time. Listed here only so we can fail fast at rollout start
+# with a clear error instead of waiting for the subprocess to crash.
+# OpenClaw's built-in `auth status` already binds these env vars
+# automatically — we don't need to patch `models.providers.<name>` (and
+# in fact must not, because that path triggers schema validation that
+# requires baseUrl + models, while the built-in catalog provides both).
+# Bedrock is intentionally absent: it uses AWS_BEARER_TOKEN_BEDROCK /
+# SigV4 wired separately in `_invoke_openclaw_agent`.
+_PROVIDER_ENV_KEYS: dict[str, str] = {
+    "openrouter": "OPENROUTER_API_KEY",
+}
+
+
+def _check_provider_credentials(upstream_provider: str) -> None:
+    """Fail fast if the env var an upstream provider needs is unset.
+
+    OpenClaw auto-binds `<PROVIDER>_API_KEY` env vars itself, so we just
+    confirm the var is in the env we'll forward to the subprocess.
+    """
+    env_key = _PROVIDER_ENV_KEYS.get(upstream_provider)
+    if env_key is None:
+        return
+    if not os.environ.get(env_key):
+        raise RuntimeError(
+            f"openclaw upstream provider {upstream_provider!r} requires env var "
+            f"{env_key} but it is unset (load .open_router.env or export it)"
         )
 
 

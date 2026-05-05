@@ -1,0 +1,5 @@
+provider: "openclaw"
+model: "openrouter/deepseek/deepseek-v4-pro"
+temperature: 0.0
+max_turns: 30
+results_root: "results/openclaw"
