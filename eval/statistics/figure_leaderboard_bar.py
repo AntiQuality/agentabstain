@@ -23,6 +23,12 @@ from PIL import Image
 from scipy import ndimage
 
 plt.rcParams["font.family"] = "Lato"
+logo_offset = 7
+figure_width = 7
+figure_height = 2.2
+bar_width = 0.35
+bar_spacing = 0.6
+label_rotation=25
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 REPO_ROOT = SCRIPT_DIR.parents[1]
@@ -55,10 +61,10 @@ LOGO_DIR = SCRIPT_DIR / "logos"
 OUTPUT_DIR = SCRIPT_DIR / "figures"
 
 HARNESS_COLORS = {
-    "Claude SDK": "#7A4F35",
-    "OpenAI SDK": "#4E79A7",
-    "Google ADK": "#D4A634",
-    "OpenClaw": "#9476A8",
+    "Claude SDK": "#FC8D59",
+    "OpenAI SDK": "#10A37F",
+    "Google ADK": "#4285F4",
+    "OpenClaw": "#E15759",
 }
 
 MODEL_PALETTE = {
@@ -168,25 +174,25 @@ def main() -> None:
                 logo_imgs.append(None)
 
     n = len(display_names)
-    fig, ax = plt.subplots(figsize=(7, 3.0))
+    fig, ax = plt.subplots(figsize=(figure_width, figure_height), dpi=300)
 
-    x_pos = np.arange(n)
-    bars = ax.bar(x_pos, values, width=0.6, color=bar_colors, edgecolor="white", linewidth=0.4, zorder=3)
+    x_pos = np.arange(n) * bar_spacing
+    bars = ax.bar(x_pos, values, width=bar_width, color=bar_colors, edgecolor="white", linewidth=0.4, zorder=3)
 
     for i, val in enumerate(values):
-        ax.text(i, val + 0.5, f"{val:.1f}", ha="center", va="bottom", fontsize=6, fontweight="bold", color="#333333")
+        ax.text(x_pos[i], val + 0.5, f"{val:.1f}", ha="center", va="bottom", fontsize=6, fontweight="bold", color="#333333")
 
     for i, logo_arr in enumerate(logo_imgs):
         if logo_arr is not None:
-            imagebox = OffsetImage(logo_arr, zoom=0.085)
-            ab = AnnotationBbox(imagebox, (i, 5.0), frameon=False, xycoords=("data", "data"), box_alignment=(0.5, 0.5))
+            imagebox = OffsetImage(logo_arr, zoom=0.07)
+            ab = AnnotationBbox(imagebox, (x_pos[i], values[i] + logo_offset), frameon=False, xycoords=("data", "data"), box_alignment=(0.5, 0.0), pad=0)
             ax.add_artist(ab)
 
     ax.set_xticks(x_pos)
-    ax.set_xticklabels(display_names, fontsize=8, rotation=40, ha="right", rotation_mode="anchor", color="#444444")
+    ax.set_xticklabels(display_names, fontsize=8, rotation=label_rotation, ha="right", rotation_mode="anchor", color="#444444")
 
     ax.set_ylim(0, 100)
-    ax.set_xlim(-0.6, n - 0.4)
+    ax.set_xlim(x_pos[0] - 0.5, x_pos[-1] + 0.4)
     ax.set_ylabel("Paired Accuracy (%)", fontsize=8.5, color="#333333")
 
     ax.yaxis.grid(True, alpha=0.2, zorder=0, color="#cccccc")
@@ -201,9 +207,9 @@ def main() -> None:
 
     legend_elements = [Patch(facecolor=c, edgecolor="none", label=h) for h, c in HARNESS_COLORS.items()]
     ax.legend(
-        handles=legend_elements, loc="upper right", fontsize=7, frameon=False,
-        ncol=4, handlelength=1.0, handletextpad=0.4,
-        columnspacing=1.0, borderpad=0.3,
+        handles=legend_elements, loc="upper right", fontsize=8, frameon=False,
+        ncol=4, handlelength=1.5, handleheight=0.35, handletextpad=0.5,
+        columnspacing=1.2, borderpad=0.1,
     )
 
     plt.tight_layout()
