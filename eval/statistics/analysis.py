@@ -249,8 +249,12 @@ def compute_summary_metrics(metric_df: pd.DataFrame) -> pd.DataFrame:
                 "category": category,
                 "action_type": action_type,
                 "metric_name": metric_name,
-                "should_act_accuracy": act_non_null.mean() if not act_non_null.empty else pd.NA,
-                "should_abstain_accuracy": abstain_non_null.mean() if not abstain_non_null.empty else pd.NA,
+                # All four metrics use the same denominator: complete
+                # pairs (both act and abstain runs non-null). This
+                # ensures Act Acc, Abstain Acc, Paired Acc, and CAR are
+                # computed over identical task sets.
+                "should_act_accuracy": complete_pairs["act"].mean() if not complete_pairs.empty else pd.NA,
+                "should_abstain_accuracy": complete_pairs["abstain"].mean() if not complete_pairs.empty else pd.NA,
                 "paired_accuracy": (
                     (complete_pairs["act"] & complete_pairs["abstain"]).mean() if not complete_pairs.empty else pd.NA
                 ),
