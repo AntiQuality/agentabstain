@@ -61,18 +61,18 @@ figure_height = 2.8
 group_width = 0.78
 bar_edge = 0.4
 
-# Cool tones for per-side accuracies (Act, Abstain); warm tones for
-# composite metrics (Paired = headline, CAR = conditioned).
+# Direct-semantic mapping: blue = "do" (Act), red = "stop" (Abstain),
+# green = "both passed" (Paired), gold = derived metric (CAR).
 PALETTES = {
-    # Lifted editorial palette — same hue families as the original
-    # visualize/visualize_environment.ipynb set but with balanced
-    # lightness so no single bar (the heavy slate blue on Act) visually
-    # dominates the chart.
+    # Lifted editorial palette — hue families from the original
+    # visualize/visualize_environment.ipynb set, with balanced
+    # lightness. Hex codes match the env notebook; only the
+    # metric→color mapping is paper-specific.
     "environment": {
-        "Act":     "#5b89b3",  # medium denim blue
-        "Abstain": "#7fb084",  # mint sage
-        "Paired":  "#d46a52",  # coral terracotta — headline
-        "CAR":     "#e6b860",  # warm gold
+        "Act":     "#5b89b3",  # medium denim blue — "do"
+        "Abstain": "#d46a52",  # coral terracotta — "stop" (red-as-stop)
+        "Paired":  "#7fb084",  # mint sage — "both passed" (green-as-pass)
+        "CAR":     "#e6b860",  # warm gold — derived metric
     },
     # Brand-saturated, matches figure_leaderboard_bar.py.
     "leaderboard": {
