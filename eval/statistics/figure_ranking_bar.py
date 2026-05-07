@@ -156,7 +156,8 @@ def main() -> None:
 
     ax.set_ylim(0, 1.0)
     ax.set_yticks(np.arange(0, 1.01, 0.2))
-    ax.set_ylabel("Average", fontsize=12, color="#333333")
+    ax.set_yticklabels([f"{int(round(v * 100))}" for v in np.arange(0, 1.01, 0.2)])
+    ax.set_ylabel("Average Accuracy (%)", fontsize=12, color="#333333")
 
     ax.yaxis.grid(True, alpha=0.25, zorder=0, color="#cccccc")
     ax.set_axisbelow(True)
@@ -176,7 +177,7 @@ def main() -> None:
         "Act":     "Act Accuracy",
         "Abstain": "Abstain Accuracy",
         "Paired":  "Paired Accuracy",
-        "CAR":     "CAR",
+        "CAR":     "CAR (Conditioned Abstention Rate)",
     }
     handles, _ = ax.get_legend_handles_labels()
     fig.legend(
