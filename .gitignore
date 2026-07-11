@@ -1,0 +1,16 @@
+**/__pycache__/
+*.pyc
+.pytest_cache/
+.ipynb_checkpoints/
+.DS_Store
+.env
+*.env
+logs/
+results/
+token_usage/
+
+# generated analysis artifacts (regenerate via eval/statistics scripts)
+eval/statistics/figures/
+eval/statistics/appendix_analysis/figures/
+eval/statistics/tables/
+eval/statistics/*.ipynb

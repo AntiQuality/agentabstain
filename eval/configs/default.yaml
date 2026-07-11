@@ -1,0 +1,5 @@
+judge_models:
+  - provider: "openai"
+    model: "gpt-5.4-2026-03-05"
+    temperature: 0.0
+    max_tokens: 1024

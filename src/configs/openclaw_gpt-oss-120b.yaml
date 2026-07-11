@@ -1,0 +1,5 @@
+provider: "openclaw"
+model: "amazon-bedrock/openai.gpt-oss-120b-1:0"
+temperature: 0.0
+max_turns: 30
+results_root: "results/openclaw"

@@ -1,0 +1,326 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from tqdm import tqdm
+
+from abstention_factory.src.utils.file_io import ensure_dir, write_json
+from src.runtime.config import InferenceConfig
+from src.types.BaseAgent import BaseAgent, TaskBundle, TaskRunResult
+from src.types.trajectory import Trajectory, TrajectoryStep
+
+RUNTIME_EXPORT_TOOL_NAME = "__runtime_export_snapshot"
+
+
+@dataclass
+class BatchRunSummary:
+    model: str
+    results_root: str
+    summary_path: str
+    completed: list[dict[str, Any]]
+    failed: list[dict[str, Any]]
+    skipped: list[dict[str, Any]] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        d: dict[str, Any] = {
+            "model": self.model,
+            "results_root": self.results_root,
+            "summary_path": self.summary_path,
+            "completed": self.completed,
+            "failed": self.failed,
+        }
+        if self.skipped:
+            d["skipped"] = self.skipped
+        return d
+
+
+def build_runtime_server_args(bundle: TaskBundle) -> list[str]:
+    return [
+        "-m",
+        "src.runtime.task_mcp_server",
+        "--category",
+        bundle.category,
+        "--task-id",
+        bundle.task_id,
+        "--task-type",
+        bundle.task_type,
+    ]
+
+
+def normalize_runtime_export_payload(payload: Any) -> dict[str, Any]:
+    structured = payload
+    if isinstance(structured, dict) and set(structured) == {"result"}:
+        structured = structured["result"]
+    if not isinstance(structured, dict):
+        raise ValueError(f"Unexpected runtime export payload: {structured!r}")
+    if "state" not in structured or "execution_log" not in structured:
+        raise ValueError(f"Incomplete runtime export payload: {structured!r}")
+    return {
+        "state": structured["state"],
+        "execution_log": structured["execution_log"],
+    }
+
+
+def default_runtime_export_payload() -> dict[str, Any]:
+    return {
+        "state": {},
+        "execution_log": [],
+    }
+
+
+def coerce_final_output(final_output: Any) -> str | None:
+    if final_output is None:
+        return None
+    if isinstance(final_output, str):
+        return final_output
+    return str(final_output)
+
+
+def build_trajectory(
+    model: str,
+    category: str,
+    task_id: str,
+    task_type: str,
+    instruction: str,
+    execution_log: list[dict[str, Any]],
+    final_output: str | None,
+) -> Trajectory:
+    trajectory = Trajectory(
+        model=model,
+        category=category,
+        task_id=task_id,
+        task_type=task_type,
+    )
+    trajectory.append(TrajectoryStep(type="user", content=instruction))
+
+    for entry in execution_log:
+        trajectory.append(
+            TrajectoryStep(
+                type="tool_call",
+                tool=entry.get("tool"),
+                params=entry.get("params"),
+            )
+        )
+        trajectory.append(
+            TrajectoryStep(
+                type="tool_result",
+                tool=entry.get("tool"),
+                result=entry.get("result"),
+                success=entry.get("success"),
+                error=entry.get("error"),
+            )
+        )
+
+    trajectory.append(TrajectoryStep(type="assistant", content=final_output or ""))
+    return trajectory
+
+
+def build_task_run_result(
+    agent: BaseAgent,
+    bundle: TaskBundle,
+    artifact_dir: Path,
+    final_output: str | None,
+    export_payload: dict[str, Any] | None,
+    run_error: str | None,
+    provider_metadata: dict[str, Any] | None = None,
+) -> TaskRunResult:
+    resolved_payload = export_payload or default_runtime_export_payload()
+    trajectory = build_trajectory(
+        model=agent.model,
+        category=bundle.category,
+        task_id=bundle.task_id,
+        task_type=bundle.task_type,
+        instruction=bundle.task_yaml["instruction"],
+        execution_log=resolved_payload["execution_log"],
+        final_output=final_output,
+    )
+    result = TaskRunResult(
+        model=agent.model,
+        category=bundle.category,
+        task_id=bundle.task_id,
+        task_type=bundle.task_type,
+        task_dir=str(bundle.task_dir),
+        instruction=bundle.task_yaml["instruction"],
+        system_prompt=bundle.task_yaml["system_prompt"],
+        final_output=final_output,
+        final_state=resolved_payload["state"],
+        execution_log=resolved_payload["execution_log"],
+        trajectory=trajectory,
+        task_metadata=bundle.metadata,
+        artifact_dir=str(artifact_dir),
+        error=run_error,
+        provider_metadata=provider_metadata,
+    )
+    agent.persist_run_artifacts(result)
+    return result
+
+
+def _has_existing_run(agent: BaseAgent, task: "InferenceTaskConfig") -> bool:
+    """Return True iff at least one timestamped run under this task slot
+    has a `run_result.json` whose `error` field is null — i.e. a real
+    successful completion worth skipping on a re-run.
+
+    Prior behavior was to skip on *any* file in the directory, which also
+    skipped failed runs (the runtime writes `run_result.json` with an
+    `error` field when a task errors out), making re-runs silently retain
+    transient infra failures. Now failed runs force a retry.
+    """
+    import json
+
+    task_id = BaseAgent.normalize_task_id(task.task_id)
+    task_dir = agent.results_root / agent.model / task.category / task_id / task.task_type
+    if not task_dir.exists():
+        return False
+    for ts_dir in task_dir.iterdir():
+        if not ts_dir.is_dir():
+            continue
+        rr = ts_dir / "run_result.json"
+        if not rr.exists():
+            continue
+        try:
+            data = json.loads(rr.read_text())
+        except Exception:
+            continue
+        if data.get("error") is None:
+            return True
+    return False
+
+
+def run_batch(
+    agent: BaseAgent,
+    config: InferenceConfig,
+    *,
+    multi_run: bool = False,
+    workers: int = 1,
+) -> BatchRunSummary:
+    """Run the task list.
+
+    `workers=1` keeps the original sequential semantics. `workers>1` runs
+    up to N tasks concurrently using an asyncio semaphore; each task gets
+    its own MCP server subprocess (see build_runtime_server_args) so
+    concurrency is safe across tasks. Skip-existing is evaluated once
+    per task before it's scheduled, so two workers never start the same
+    task slot. Result-file writes are per-(task_dir, timestamp) so
+    there's no filesystem race.
+    """
+    import asyncio
+
+    completed: list[dict[str, Any]] = []
+    failed: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+
+    # Pre-filter skips synchronously so the progress bar total reflects only
+    # the work actually being done — mixing skip-counting with async run
+    # bookkeeping would make the bar jump around confusingly.
+    tasks_to_run: list = []
+    for task in config.tasks:
+        if not multi_run and _has_existing_run(agent, task):
+            skipped.append({
+                "category": task.category,
+                "task_id": BaseAgent.normalize_task_id(task.task_id),
+                "task_type": task.task_type,
+                "skipped": True,
+            })
+            continue
+        tasks_to_run.append(task)
+
+    if not tasks_to_run:
+        summary_path = _write_batch_summary(agent, config, completed, failed, skipped)
+        return BatchRunSummary(
+            model=agent.model,
+            results_root=str(agent.results_root),
+            summary_path=str(summary_path),
+            completed=completed,
+            failed=failed,
+            skipped=skipped or None,
+        )
+
+    pbar = tqdm(
+        total=len(tasks_to_run),
+        desc=f"{agent.model} [⏭{len(skipped)}]",
+        unit="task",
+    )
+
+    async def _run_one(task) -> dict[str, Any]:
+        try:
+            result = await agent.arun(task.category, task.task_id, task.task_type)
+            item = {
+                "category": task.category,
+                "task_id": result.task_id,
+                "task_type": task.task_type,
+                "artifact_dir": result.artifact_dir,
+                "final_output": result.final_output,
+                "error": result.error,
+            }
+            return {"ok": result.error is None, "item": item, "label": f"{task.category}/{task.task_id}/{task.task_type}"}
+        except Exception as exc:
+            return {
+                "ok": False,
+                "item": {
+                    "category": task.category,
+                    "task_id": task.task_id,
+                    "task_type": task.task_type,
+                    "error": str(exc),
+                },
+                "label": f"{task.category}/{task.task_id}/{task.task_type}",
+            }
+
+    async def _main() -> None:
+        sem = asyncio.Semaphore(max(1, workers))
+
+        async def _gated(task):
+            async with sem:
+                pbar.set_postfix_str(f"{task.category}/{task.task_id}/{task.task_type}")
+                return await _run_one(task)
+
+        coros = [_gated(t) for t in tasks_to_run]
+        # Use as_completed so the pbar advances as results arrive rather
+        # than waiting on gather's all-or-nothing completion.
+        for fut in asyncio.as_completed(coros):
+            res = await fut
+            if res["ok"]:
+                completed.append(res["item"])
+            else:
+                failed.append(res["item"])
+            pbar.update(1)
+            pbar.set_description(
+                f"{agent.model} [✓{len(completed)} ✗{len(failed)} ⏭{len(skipped)}]"
+            )
+
+    asyncio.run(_main())
+    pbar.close()
+
+    summary_path = _write_batch_summary(agent, config, completed, failed, skipped)
+    return BatchRunSummary(
+        model=agent.model,
+        results_root=str(agent.results_root),
+        summary_path=str(summary_path),
+        completed=completed,
+        failed=failed,
+        skipped=skipped or None,
+    )
+
+
+def _write_batch_summary(
+    agent: BaseAgent,
+    config: InferenceConfig,
+    completed: list[dict[str, Any]],
+    failed: list[dict[str, Any]],
+    skipped: list[dict[str, Any]] | None = None,
+) -> Path:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    summary_dir = agent.results_root / agent.model / "batch_runs" / timestamp
+    ensure_dir(summary_dir)
+    summary_path = summary_dir / "summary.json"
+    payload: dict[str, Any] = {
+        "config": config.to_dict(),
+        "completed": completed,
+        "failed": failed,
+    }
+    if skipped:
+        payload["skipped"] = skipped
+    write_json(summary_path, payload)
+    return summary_path

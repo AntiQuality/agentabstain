@@ -1,0 +1,5 @@
+provider: "claudesdk"
+model: "us.anthropic.claude-sonnet-4-6"
+temperature: 0.0
+max_turns: 30
+results_root: "results/claudesdk"
