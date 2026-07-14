@@ -107,7 +107,7 @@ bash eval/scripts/eval.sh
 
 ## Dataset
 
-The 263 task pairs and the 42 sandbox environments are hosted on [Hugging Face](https://huggingface.co/datasets/antiquality/agentabstain); task sets under `src/configs/` reference dataset task IDs. The AbstainGen generation pipeline is fully documented in the paper and intentionally not open-sourced: a public generator would let benchmark-matched training data be synthesized at scale. Fresh evaluation rounds can be generated privately on demand, which keeps the benchmark resistant to training-data contamination.
+The 263 task pairs and the 42 sandbox environments are hosted on [Hugging Face](https://huggingface.co/datasets/antiquality/agentabstain); task sets under `src/configs/` reference dataset task IDs. The AbstainGen generation pipeline is fully documented in the paper and intentionally not open-sourced, as a public generator would let benchmark-matched training data be synthesized at scale. Fresh evaluation rounds can be generated privately on demand, which keeps the benchmark resistant to training-data contamination.
 
 ## License
 
