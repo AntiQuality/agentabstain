@@ -6,7 +6,7 @@
   <p>
     <a href="https://agentabstain.github.io"><img src="https://img.shields.io/badge/Website-agentabstain.github.io-4a5fc1" alt="Website"></a>
     <a href="https://huggingface.co/datasets/antiquality/agentabstain"><img src="https://img.shields.io/badge/Dataset-Hugging%20Face-ffcc4d" alt="Dataset"></a>
-    <a href="https://agentabstain.github.io"><img src="https://img.shields.io/badge/arXiv-coming%20soon-b31b1b" alt="arXiv"></a>
+    <a href="https://arxiv.org/abs/2607.10059"><img src="https://img.shields.io/badge/arXiv-2607.10059-b31b1b" alt="arXiv"></a>
   </p>
 
   <p><i>The first systematic evaluation framework for agentic abstention:<br>the calibrated ability of tool-using LLM agents to recognize when <b>not</b> to act.</i></p>
@@ -109,6 +109,10 @@ bash eval/scripts/eval.sh
 
 The 263 task pairs and the 42 sandbox environments are hosted on [Hugging Face](https://huggingface.co/datasets/antiquality/agentabstain). Task sets under `src/configs/` reference dataset task IDs, and AbstainGen can regenerate fresh instances on demand, which keeps the benchmark resistant to training-data contamination.
 
+## License
+
+Code is released under the [MIT License](LICENSE). The [dataset](https://huggingface.co/datasets/antiquality/agentabstain) is released under CC BY 4.0.
+
 ## Citation
 
 ```bibtex
@@ -116,16 +120,8 @@ The 263 task pairs and the 42 sandbox environments are hosted on [Hugging Face](
   title  = {AgentAbstain: Do LLM Agents Know When Not to Act?},
   author = {Liu, Xun and Zhang, Yi Evie and Kasprova, Vira and Rabbani, Parisa and Zahraei, Pardis Sadat and Zhang, Tianyu and Ebrahimpour-Boroojeny, Ali and Chandrasekaran, Varun},
   year   = {2026},
-  eprint = {XXXX.XXXXX},
+  eprint = {2607.10059},
   archivePrefix = {arXiv},
   primaryClass  = {cs.AI}
 }
 ```
-
-The arXiv identifier is pending; the [website](https://agentabstain.github.io) always carries the latest citation entry.
-
----
-
-<div align="center">
-  <sub>University of Illinois Urbana-Champaign · 2026 · <a href="https://agentabstain.github.io">agentabstain.github.io</a></sub>
-</div>
