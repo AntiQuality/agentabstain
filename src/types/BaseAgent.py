@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -67,7 +68,9 @@ class TaskRunResult:
 
 
 class BaseAgent(ABC):
-    TASKS_ROOT = Path("abstention_factory/tasks")
+    # Tasks ship with the AgentAbstain dataset; AGENTABSTAIN_DATA points at the
+    # downloaded snapshot (default: ./data), which holds tasks/ and environments/.
+    TASKS_ROOT = Path(os.environ.get("AGENTABSTAIN_DATA", "data")) / "tasks"
 
     def __init__(self, model: str, temperature: float, max_turns: int, results_root: str | Path):
         self.model = model

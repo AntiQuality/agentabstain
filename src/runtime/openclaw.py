@@ -222,6 +222,12 @@ async def run_openclaw_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pat
             "profile": "minimal",
             "alsoAllow": ["bundle-mcp"],
         },
+        # The paper's evaluation campaign ran on openclaw 2026.4.29 (see
+        # agent/openclaw/README.md), which is the version this harness targets:
+        # npm i -g openclaw@2026.4.29. openclaw >= 2026.7 removed
+        # agents.list[].systemPromptOverride from the config schema (per-agent
+        # instructions moved to workspace bootstrap files), so newer CLI
+        # versions reject this key.
         "systemPromptOverride": bundle.task_yaml["system_prompt"],
     }
 

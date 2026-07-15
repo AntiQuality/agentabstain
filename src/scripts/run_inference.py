@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -37,7 +38,13 @@ def main() -> None:
                         help="Number of tasks to run concurrently (default: 1 sequential). "
                              "Each concurrent task spawns its own MCP server subprocess; "
                              "tune based on provider rate limits and local RAM.")
+    parser.add_argument("--smoke", action="store_true", default=False,
+                        help="Run the bundled one-pair smoke test (src/configs/tasks_smoke.yaml) "
+                             "to verify the setup end-to-end; stands in for --task-config.")
     args = parser.parse_args()
+
+    if args.smoke and not args.task_config:
+        args.task_config = str(Path(__file__).resolve().parents[1] / "configs" / "tasks_smoke.yaml")
 
     if args.runtime_config and args.task_config:
         config = InferenceConfig.from_files(args.runtime_config, args.task_config)

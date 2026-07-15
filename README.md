@@ -63,6 +63,10 @@ Across 17 frontier LLMs in 4 agent harnesses, the best agent reaches only **59.5
 ## Repository Layout
 
 ```
+agent/                        harness adapters (Claude SDK, OpenAI SDK, Google ADK, OpenClaw)
+abstention_factory/           vendored runtime core: environment contract, registry, shared utils
+                              (the AbstainGen generation pipeline itself is not released)
+
 src/                          inference runtime
 ├── runtime/                  agent harness integrations (Claude SDK, OpenAI SDK, Google ADK, OpenClaw)
 ├── configs/                  17 model configs + task sets (tasks.yaml is the full benchmark)
@@ -77,9 +81,20 @@ eval/                         evaluation harness
 └── scripts/eval.sh           batch evaluation across models
 ```
 
-## Getting Started
+## Quick Start
 
-Python 3.10+ is expected, plus the SDKs of the harnesses you want to run (OpenAI Agents SDK, Anthropic Claude SDK, Google ADK). Provider credentials are read from the environment.
+Verified end-to-end on a fresh Python 3.10+ environment:
+
+```bash
+git clone https://github.com/AntiQuality/agentabstain && cd agentabstain
+pip install -r requirements.txt
+
+# fetch the benchmark: 263 task pairs + 42 executable environments
+python -c "from huggingface_hub import snapshot_download; \
+           snapshot_download('antiquality/agentabstain', repo_type='dataset', local_dir='data')"
+```
+
+The runtime reads tasks and environments from `./data` by default; set `AGENTABSTAIN_DATA` to use another location. Provider credentials are read from the environment (a local `.env` file is also supported).
 
 **Run inference.** Rollouts are written to `results/{provider}/{model}/`:
 
@@ -94,7 +109,17 @@ python -m src.scripts.run_inference \
     --workers 4
 ```
 
-**Run evaluation.** The commit check and the LLM judge score saved rollouts:
+**Smoke test.** Verify the full loop on a single task pair (two runs, a few cents of API usage). Works with any model config:
+
+```bash
+python -m src.scripts.run_inference \
+    --runtime-config src/configs/openclaw_deepseek-v4-pro.yaml --smoke
+python -m eval.runner --provider openclaw --model openrouter/deepseek/deepseek-v4-pro
+```
+
+OpenClaw-harness models additionally need the openclaw CLI pinned to the version used for the paper's evaluation campaign (`npm install -g openclaw@2026.4.29`; Node 22.14 to 23.x, since this older build predates Node 24 native-module ABIs; see `agent/openclaw/README.md`) and `OPENROUTER_API_KEY`; set `OPENCLAW_BIN` if the binary is not on your PATH. Newer openclaw releases (2026.7+) changed the agent config schema and also alter how the per-task system prompt reaches the model, so they are not drop-in compatible with this harness.
+
+**Run evaluation.** The commit check and the LLM judge score saved rollouts. The judge is configured in `eval/configs/default.yaml` and reads the standard OpenAI environment variables, so any OpenAI-compatible gateway works via `OPENAI_BASE_URL`:
 
 ```bash
 python -m eval.runner --provider claudesdk --model claude-opus-4-7

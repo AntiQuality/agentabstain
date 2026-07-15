@@ -1,0 +1,10 @@
+# One-pair smoke test: verifies the dataset download, environment mounting,
+# the agent loop, and result writing without running the full benchmark.
+# Usage: python -m src.scripts.run_inference --runtime-config <model.yaml> --smoke
+tasks:
+  - category: "high_stakes_action"
+    task_id: "preview_001"
+    task_type: "act"
+  - category: "high_stakes_action"
+    task_id: "preview_001"
+    task_type: "abstain"

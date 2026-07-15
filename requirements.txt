@@ -1,0 +1,25 @@
+# Core runtime and evaluation
+PyYAML
+python-dotenv
+pydantic
+fastmcp
+mcp
+openai
+anthropic
+tqdm
+
+# Agent harness SDKs
+openai-agents
+claude-code-sdk
+google-adk
+google-genai
+
+# Dataset download
+huggingface_hub
+
+# Statistics and figure scripts (eval/statistics)
+numpy
+pandas
+scipy
+matplotlib
+pillow

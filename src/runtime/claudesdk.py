@@ -65,11 +65,11 @@ async def run_claudesdk_task(agent: BaseAgent, bundle: TaskBundle, repo_root: Pa
     # exclusively through env-specific MCP tools we bridge in via
     # `mcp_servers`. Without this denylist, `permission_mode=
     # "bypassPermissions"` lets the model silently call Read / Glob /
-    # Bash / WebFetch and discover repo context (CLAUDE.md, .background/
-    # taxonomy, task source code) that biases its abstention decision
-    # — verified empirically: Sonnet's run-1 response named the
-    # "AgentAbstain" benchmark, a string that only appears in CLAUDE.md.
-    # Listed by canonical Claude Code tool name.
+    # Bash / WebFetch and discover repo context (project docs, task
+    # source code) that biases its abstention decision; verified
+    # empirically: one development run's response named the
+    # "AgentAbstain" benchmark, a string it could only have read from
+    # the working repo's docs. Listed by canonical Claude Code tool name.
     builtin_tools_denied = [
         "Bash",
         "BashOutput",
