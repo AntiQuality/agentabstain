@@ -83,8 +83,6 @@ eval/                         evaluation harness
 
 ## Quick Start
 
-Verified end-to-end on a fresh Python 3.10+ environment.
-
 ### 1. Set up an environment
 
 ```bash
