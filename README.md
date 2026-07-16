@@ -145,7 +145,7 @@ python -m src.scripts.run_inference \
 
 ### 6. Run evaluation
 
-The commit check and the LLM judge score saved rollouts; the judge is configured in `eval/configs/default.yaml`. `--model` is the model string from the runtime config, i.e. the directory name under `results/{provider}/`:
+The commit check and the LLM judge score saved rollouts; the judge is configured in `eval/configs/default.yaml`. If your gateway namespaces model IDs (OpenRouter, for example, wants `openai/gpt-5.4` rather than the bare OpenAI ID), change `judge_models[].model` there to match. `--model` is the model string from the runtime config, i.e. the directory name under `results/{provider}/`:
 
 ```bash
 python -m eval.runner --provider claudesdk --model us.anthropic.claude-opus-4-7
@@ -153,6 +153,8 @@ python -m eval.runner --provider claudesdk --model us.anthropic.claude-opus-4-7
 # or batch across models
 bash eval/scripts/eval.sh
 ```
+
+Judge verdicts are cached in each run's `eval.json` and reused on re-runs, including error records from a misconfigured judge; pass `--override-judge` to re-judge after fixing the configuration.
 
 ### 7. Regenerate figures
 
