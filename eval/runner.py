@@ -4,6 +4,13 @@ import argparse
 import json
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Judge credentials (OPENAI_API_KEY, optionally OPENAI_BASE_URL) may live in
+# a local .env rather than the shell; load it before any judge client is
+# built so `python -m eval.runner` works with the same .env as inference.
+load_dotenv(override=True)
+
 from abstention_factory.src.utils.file_io import read_yaml, utc_now_iso, write_json
 from eval.config import EvaluationConfig
 from eval.discovery import discover_run_result_paths

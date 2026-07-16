@@ -83,20 +83,56 @@ eval/                         evaluation harness
 
 ## Quick Start
 
-Verified end-to-end on a fresh Python 3.10+ environment:
+Verified end-to-end on a fresh Python 3.10+ environment.
+
+### 1. Set up an environment
 
 ```bash
 git clone https://github.com/AntiQuality/agentabstain && cd agentabstain
+
+# with conda
+conda create -n agentabstain python=3.11 -y
+conda activate agentabstain
 pip install -r requirements.txt
 
-# fetch the benchmark: 263 task pairs + 42 executable environments
+# or with uv
+uv venv --python 3.11 && source .venv/bin/activate
+uv pip install -r requirements.txt
+```
+
+### 2. Fetch the benchmark
+
+```bash
+# 263 task pairs + 42 executable environments, from Hugging Face
 python -c "from huggingface_hub import snapshot_download; \
            snapshot_download('antiquality/agentabstain', repo_type='dataset', local_dir='data')"
 ```
 
-The runtime reads tasks and environments from `./data` by default; set `AGENTABSTAIN_DATA` to use another location. Provider credentials are read from the environment (a local `.env` file is also supported).
+The runtime reads tasks and environments from `./data` by default; set `AGENTABSTAIN_DATA` to use another location.
 
-**Run inference.** Rollouts are written to `results/{provider}/{model}/`:
+### 3. Configure credentials
+
+```bash
+cp .env.template .env    # then fill in the keys you need
+```
+
+Inference and evaluation both load `.env` automatically; values already exported in your shell win. You only need the keys for what you run: `OPENAI_API_KEY` powers the OpenAI SDK harness and the response judge (any OpenAI-compatible gateway works via `OPENAI_BASE_URL`), `GOOGLE_API_KEY` the Google ADK harness, and `OPENROUTER_API_KEY` the OpenClaw harness. The Claude SDK harness takes either `ANTHROPIC_API_KEY` with native model IDs or the Bedrock route pinned in the shipped configs; the template documents both.
+
+### 4. Smoke test
+
+Verify the full loop on a single task pair (two runs, a few cents of API usage). Works with any model config:
+
+```bash
+python -m src.scripts.run_inference \
+    --runtime-config src/configs/openclaw_deepseek-v4-pro.yaml --smoke
+python -m eval.runner --provider openclaw --model openrouter/deepseek/deepseek-v4-pro
+```
+
+OpenClaw-harness models additionally need the openclaw CLI pinned to the version used for the paper's evaluation campaign (`npm install -g openclaw@2026.4.29`; Node 22.14 to 23.x, since this older build predates Node 24 native-module ABIs; see `agent/openclaw/README.md`). Newer openclaw releases (2026.7+) changed the agent config schema and also alter how the per-task system prompt reaches the model, so they are not drop-in compatible with this harness.
+
+### 5. Run inference
+
+Rollouts are written to `results/{provider}/{model}/`:
 
 ```bash
 # all models of one provider family
@@ -109,26 +145,20 @@ python -m src.scripts.run_inference \
     --workers 4
 ```
 
-**Smoke test.** Verify the full loop on a single task pair (two runs, a few cents of API usage). Works with any model config:
+### 6. Run evaluation
+
+The commit check and the LLM judge score saved rollouts; the judge is configured in `eval/configs/default.yaml`. `--model` is the model string from the runtime config, i.e. the directory name under `results/{provider}/`:
 
 ```bash
-python -m src.scripts.run_inference \
-    --runtime-config src/configs/openclaw_deepseek-v4-pro.yaml --smoke
-python -m eval.runner --provider openclaw --model openrouter/deepseek/deepseek-v4-pro
-```
-
-OpenClaw-harness models additionally need the openclaw CLI pinned to the version used for the paper's evaluation campaign (`npm install -g openclaw@2026.4.29`; Node 22.14 to 23.x, since this older build predates Node 24 native-module ABIs; see `agent/openclaw/README.md`) and `OPENROUTER_API_KEY`; set `OPENCLAW_BIN` if the binary is not on your PATH. Newer openclaw releases (2026.7+) changed the agent config schema and also alter how the per-task system prompt reaches the model, so they are not drop-in compatible with this harness.
-
-**Run evaluation.** The commit check and the LLM judge score saved rollouts. The judge is configured in `eval/configs/default.yaml` and reads the standard OpenAI environment variables, so any OpenAI-compatible gateway works via `OPENAI_BASE_URL`:
-
-```bash
-python -m eval.runner --provider claudesdk --model claude-opus-4-7
+python -m eval.runner --provider claudesdk --model us.anthropic.claude-opus-4-7
 
 # or batch across models
 bash eval/scripts/eval.sh
 ```
 
-**Regenerate figures.** Every figure in the paper is produced by a script under `eval/statistics/` (for example `figure_ranking_bar.py`, `figure_category_difficulty.py`); each reads the evaluation outputs from your own runs.
+### 7. Regenerate figures
+
+Every figure in the paper is produced by a script under `eval/statistics/` (for example `figure_ranking_bar.py`, `figure_category_difficulty.py`); each reads the evaluation outputs from your own runs.
 
 ## Dataset
 
