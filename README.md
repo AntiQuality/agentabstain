@@ -171,12 +171,12 @@ Code is released under the [MIT License](LICENSE). The [dataset](https://hugging
 ## Citation
 
 ```bibtex
-@misc{liu2026agentabstain,
-  title  = {AgentAbstain: Do LLM Agents Know When Not to Act?},
-  author = {Liu, Xun and Zhang, Yi Evie and Kasprova, Vira and Rabbani, Parisa and Zahraei, Pardis Sadat and Zhang, Tianyu and Ebrahimpour-Boroojeny, Ali and Chandrasekaran, Varun},
-  year   = {2026},
-  eprint = {2607.10059},
-  archivePrefix = {arXiv},
-  primaryClass  = {cs.AI}
+@inproceedings{liu2026agentabstain,
+  title     = {AgentAbstain: Do LLM Agents Know When Not to Act?},
+  author    = {Liu, Xun and Zhang, Yi Evie and Kasprova, Vira and Rabbani, Parisa and Zahraei, Pardis Sadat and Zhang, Tianyu and Ebrahimpour-Boroojeny, Ali and Chandrasekaran, Varun},
+  booktitle = {Advances in Neural Information Processing Systems},
+  year      = {2026},
+  note      = {Oral},
+  url       = {https://arxiv.org/abs/2607.10059}
 }
 ```
